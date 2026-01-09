@@ -1,0 +1,26 @@
+# Tacview Scenario Generation Configuration
+# Configuration for generating Tacview ACMI files from trained models or random agents
+# Environment settings (map_size, num_agents, weapon config, etc.) are inherited from train_config_path
+
+# Model Configuration
+model:
+  # Path to trained model checkpoint (set to null to use random actions)
+  checkpoint_path: null
+
+  # Path to training configuration (used for environment settings)
+  # All environment settings are inherited from this config
+  train_config_path: "reinforcement_learning/configs/train_config.yaml"
+
+# Simulation Configuration
+simulation:
+  # Number of simulation steps to run
+  frames: 1000
+
+  # Output ACMI file path (use null for auto-generated timestamp-based filename)
+  acmi_output_path: null
+  # If null, will generate: tacview/logs/scenario_YYYYMMDD_HHMMSS.acmi
+
+# Output Configuration
+output:
+  # Print step progress every N steps
+  progress_interval: 50

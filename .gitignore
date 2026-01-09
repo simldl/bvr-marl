@@ -1,0 +1,40 @@
+# Python
+*.py[cod]
+*.so
+
+# VS Code
+.vscode/
+
+# Environments
+.env
+*.env
+.venv/
+env/
+venv/
+ENV/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs and caches
+*.log
+*.gif
+*.sqlite3
+.cache/
+\logs
+\models
+\outputs
+*.png
+**/__pycache__/
+reward_logs/
+
+# Ray temporary files
+ray_tmp/
+.ray/
+
+# Package
+\air_to_air_rl.egg-info

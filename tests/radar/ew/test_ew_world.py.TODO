@@ -1,0 +1,408 @@
+"""
+Tests for EW (Electronic Warfare) World coordination functionality.
+"""
+
+import pytest
+import numpy as np
+from radar.ew.ew_world import EWWorld
+from radar.ew.ecm_emitter import ECMEmitter
+
+
+class MockOwner:
+    """Mock aircraft/unit owner."""
+    def __init__(self, unit_id, group, x=0.0, y=0.0, z=5000.0):
+        self.id = unit_id
+        self.group = group
+        self.position = type('Pos', (), {'x': x, 'y': y, 'z': z,
+                                          'lat': 0.0, 'lon': 0.0, 'alt': z})()
+
+
+class MockRadar:
+    """Mock radar for testing."""
+    def __init__(self, owner):
+        self.owner = owner
+        self.freq_hz = 10e9
+        self.antenna_gain_db = 30.0
+        self.jam_susceptible = True  # Aircraft radars are susceptible
+
+
+@pytest.fixture
+def ew_world():
+    """Create a basic EW world for testing."""
+    return EWWorld()
+
+
+@pytest.fixture
+def blue_jammer():
+    """Create a BLUE force jammer."""
+    owner = MockOwner(unit_id="blue1", group="BLUE", x=0.0, y=0.0, z=5000.0)
+    return ECMEmitter(
+        owner=owner,
+        erp_w=2000.0,
+        bw_hz=2e6,
+        techniques={"drfm_multi_false"}
+    )
+
+
+@pytest.fixture
+def red_jammer():
+    """Create a RED force jammer."""
+    owner = MockOwner(unit_id="red1", group="RED", x=10000.0, y=0.0, z=5000.0)
+    return ECMEmitter(
+        owner=owner,
+        erp_w=1500.0,
+        bw_hz=1.5e6,
+        techniques={"noise", "drfm_multi_false"}
+    )
+
+
+class TestEWWorldInitialization:
+    """Test EW World initialization."""
+
+    def test_empty_initialization(self, ew_world):
+        """Test that EW world initializes empty."""
+        assert len(ew_world.jammers) == 0
+
+    def test_add_jammer(self, ew_world, blue_jammer):
+        """Test adding a jammer to the EW world."""
+        ew_world.add_jammer(blue_jammer)
+
+        assert len(ew_world.jammers) == 1
+        assert blue_jammer in ew_world.jammers
+
+    def test_add_multiple_jammers(self, ew_world, blue_jammer, red_jammer):
+        """Test adding multiple jammers."""
+        ew_world.add_jammer(blue_jammer)
+        ew_world.add_jammer(red_jammer)
+
+        assert len(ew_world.jammers) == 2
+        assert blue_jammer in ew_world.jammers
+        assert red_jammer in ew_world.jammers
+
+    def test_add_same_jammer_twice(self, ew_world, blue_jammer):
+        """Test that adding the same jammer twice doesn't duplicate."""
+        ew_world.add_jammer(blue_jammer)
+        ew_world.add_jammer(blue_jammer)
+
+        # Should only be added once
+        assert len(ew_world.jammers) == 1
+
+
+class TestJammerRemoval:
+    """Test jammer removal from EW world."""
+
+    def test_remove_jammer(self, ew_world, blue_jammer):
+        """Test removing a jammer."""
+        ew_world.add_jammer(blue_jammer)
+        assert len(ew_world.jammers) == 1
+
+        ew_world.remove_jammer(blue_jammer)
+        assert len(ew_world.jammers) == 0
+
+    def test_remove_nonexistent_jammer(self, ew_world, blue_jammer):
+        """Test removing a jammer that doesn't exist."""
+        # Should not crash
+        ew_world.remove_jammer(blue_jammer)
+        assert len(ew_world.jammers) == 0
+
+    def test_remove_by_owner(self, ew_world, blue_jammer):
+        """Test removing jammer by owner ID."""
+        ew_world.add_jammer(blue_jammer)
+        owner_id = blue_jammer.owner.id
+
+        ew_world.remove_jammer_by_owner(owner_id)
+        assert len(ew_world.jammers) == 0
+
+
+class TestJammingEffectsCalculation:
+    """Test jamming effects calculation on victim radars."""
+
+    def test_compute_total_jamming_single_jammer(self, ew_world, blue_jammer):
+        """Test jamming calculation with single jammer."""
+        ew_world.add_jammer(blue_jammer)
+
+        blue_owner = MockOwner("victim1", "RED", x=5000.0, y=0.0, z=5000.0)
+        victim_radar = MockRadar(blue_owner)
+
+        total_J = ew_world.compute_total_jamming(
+            victim_radar=victim_radar,
+            t=0.0,
+            victim_position=blue_owner.position
+        )
+
+        # Should receive jamming from the jammer
+        assert total_J > 0.0
+
+    def test_compute_total_jamming_multiple_jammers(self, ew_world, blue_jammer, red_jammer):
+        """Test jamming with multiple jammers (additive effect)."""
+        ew_world.add_jammer(blue_jammer)
+        ew_world.add_jammer(red_jammer)
+
+        victim_owner = MockOwner("victim1", "GREEN", x=5000.0, y=0.0, z=5000.0)
+        victim_radar = MockRadar(victim_owner)
+
+        total_J = ew_world.compute_total_jamming(
+            victim_radar=victim_radar,
+            t=0.0,
+            victim_position=victim_owner.position
+        )
+
+        # Calculate individual contributions
+        J1 = blue_jammer.compute_J(victim_radar, t=0.0, victim_position=victim_owner.position)
+        J2 = red_jammer.compute_J(victim_radar, t=0.0, victim_position=victim_owner.position)
+
+        # Total should be sum of both (additive jamming)
+        assert abs(total_J - (J1 + J2)) < 1e-6
+
+    def test_friendly_jamming_excluded(self, ew_world, blue_jammer):
+        """Test that friendly jammers don't jam same-group radars."""
+        ew_world.add_jammer(blue_jammer)
+
+        # Victim is same group as jammer (BLUE)
+        blue_victim = MockOwner("blue_vic", "BLUE", x=5000.0, y=0.0, z=5000.0)
+        victim_radar = MockRadar(blue_victim)
+
+        total_J = ew_world.compute_total_jamming(
+            victim_radar=victim_radar,
+            t=0.0,
+            victim_position=blue_victim.position
+        )
+
+        # Friendly jammer should not jam same-group radars
+        assert total_J == 0.0 or total_J < 1e-9  # Essentially zero
+
+    def test_missile_seeker_immunity(self, ew_world, blue_jammer):
+        """Test that missile seekers are immune to jamming."""
+        ew_world.add_jammer(blue_jammer)
+
+        victim_owner = MockOwner("missile1", "RED", x=3000.0, y=0.0, z=5000.0)
+        victim_radar = MockRadar(victim_owner)
+        victim_radar.jam_susceptible = False  # Missile seeker
+
+        total_J = ew_world.compute_total_jamming(
+            victim_radar=victim_radar,
+            t=0.0,
+            victim_position=victim_owner.position
+        )
+
+        # Missile seekers should be immune
+        assert total_J == 0.0
+
+
+class TestDeceptionCoordination:
+    """Test coordinated deception (ghost) generation."""
+
+    def test_collect_all_deceptions_single_jammer(self, ew_world, blue_jammer):
+        """Test collecting deceptions from single jammer."""
+        ew_world.add_jammer(blue_jammer)
+
+        victim_owner = MockOwner("victim1", "RED", x=5000.0, y=0.0, z=5000.0)
+        victim_radar = MockRadar(victim_owner)
+
+        all_ghosts = ew_world.collect_all_deceptions(
+            victim_radar=victim_radar,
+            t=0.0,
+            victim_position=victim_owner.position
+        )
+
+        # Should be a list (may be empty or contain ghosts)
+        assert isinstance(all_ghosts, list)
+
+    def test_collect_all_deceptions_multiple_jammers(self, ew_world, blue_jammer, red_jammer):
+        """Test collecting deceptions from multiple jammers."""
+        ew_world.add_jammer(blue_jammer)
+        ew_world.add_jammer(red_jammer)
+
+        victim_owner = MockOwner("victim1", "GREEN", x=5000.0, y=0.0, z=5000.0)
+        victim_radar = MockRadar(victim_owner)
+
+        all_ghosts = ew_world.collect_all_deceptions(
+            victim_radar=victim_radar,
+            t=0.0,
+            victim_position=victim_owner.position
+        )
+
+        # Should combine ghosts from all jammers
+        assert isinstance(all_ghosts, list)
+        # Multiple jammers with DRFM should produce multiple ghosts
+        # (though exact number depends on randomization)
+
+    def test_no_deceptions_from_friendly_jammers(self, ew_world, blue_jammer):
+        """Test that friendly jammers don't create deceptions against same group."""
+        ew_world.add_jammer(blue_jammer)
+
+        # Same group as jammer
+        blue_victim = MockOwner("blue_vic", "BLUE", x=5000.0, y=0.0, z=5000.0)
+        victim_radar = MockRadar(blue_victim)
+
+        all_ghosts = ew_world.collect_all_deceptions(
+            victim_radar=victim_radar,
+            t=0.0,
+            victim_position=blue_victim.position
+        )
+
+        # Friendly jammers should not create deceptions
+        assert len(all_ghosts) == 0
+
+
+class TestEWWorldUpdate:
+    """Test EW world update functionality."""
+
+    def test_update_with_time_progression(self, ew_world, blue_jammer):
+        """Test that EW world updates with time."""
+        ew_world.add_jammer(blue_jammer)
+
+        # Update with time step
+        ew_world.update(dt=0.1)
+
+        # Should not crash and world should still have jammer
+        assert len(ew_world.jammers) == 1
+
+    def test_update_removes_inactive_jammers(self, ew_world):
+        """Test that update removes jammers with inactive owners."""
+        # Create jammer with owner that will be "destroyed"
+        owner = MockOwner("test1", "BLUE", x=0.0, y=0.0, z=5000.0)
+        jammer = ECMEmitter(owner=owner, erp_w=1000.0, bw_hz=1e6)
+
+        ew_world.add_jammer(jammer)
+        assert len(ew_world.jammers) == 1
+
+        # Mark owner as inactive (destroyed)
+        owner.is_active = False
+
+        # Update should potentially remove inactive jammer
+        # (depends on implementation - may keep or remove)
+        ew_world.update(dt=0.1)
+
+
+class TestEWWorldEdgeCases:
+    """Test edge cases and error conditions."""
+
+    def test_empty_world_jamming(self, ew_world):
+        """Test jamming calculation in empty EW world."""
+        victim_owner = MockOwner("victim1", "BLUE", x=0.0, y=0.0, z=5000.0)
+        victim_radar = MockRadar(victim_owner)
+
+        total_J = ew_world.compute_total_jamming(
+            victim_radar=victim_radar,
+            t=0.0,
+            victim_position=victim_owner.position
+        )
+
+        # No jammers = no jamming
+        assert total_J == 0.0
+
+    def test_empty_world_deceptions(self, ew_world):
+        """Test deception collection in empty EW world."""
+        victim_owner = MockOwner("victim1", "BLUE", x=0.0, y=0.0, z=5000.0)
+        victim_radar = MockRadar(victim_owner)
+
+        all_ghosts = ew_world.collect_all_deceptions(
+            victim_radar=victim_radar,
+            t=0.0,
+            victim_position=victim_owner.position
+        )
+
+        # No jammers = no ghosts
+        assert len(all_ghosts) == 0
+
+    def test_add_none_jammer(self, ew_world):
+        """Test adding None as jammer."""
+        # Should handle gracefully
+        try:
+            ew_world.add_jammer(None)
+            # If it doesn't raise, check it wasn't added
+            assert None not in ew_world.jammers
+        except (TypeError, ValueError, AttributeError):
+            # Acceptable to raise error
+            pass
+
+    def test_very_distant_jammer_minimal_effect(self, ew_world):
+        """Test that very distant jammer has minimal effect."""
+        # Jammer very far away (100 km)
+        distant_owner = MockOwner("distant", "RED", x=100000.0, y=0.0, z=5000.0)
+        distant_jammer = ECMEmitter(
+            owner=distant_owner,
+            erp_w=1000.0,
+            bw_hz=1e6
+        )
+        ew_world.add_jammer(distant_jammer)
+
+        victim_owner = MockOwner("victim", "BLUE", x=0.0, y=0.0, z=5000.0)
+        victim_radar = MockRadar(victim_owner)
+
+        total_J = ew_world.compute_total_jamming(
+            victim_radar=victim_radar,
+            t=0.0,
+            victim_position=victim_owner.position
+        )
+
+        # Very distant jammer should have minimal effect (1/R^2)
+        assert total_J >= 0.0
+        # But should be very small due to range
+        assert total_J < 1e-6  # Essentially negligible
+
+
+class TestRealisticEWScenarios:
+    """Test realistic EW engagement scenarios."""
+
+    def test_escort_jammer_scenario(self, ew_world):
+        """Test scenario with escort jammer protecting strike package."""
+        # Escort jammer
+        escort = MockOwner("escort1", "BLUE", x=2000.0, y=0.0, z=7000.0)
+        escort_jammer = ECMEmitter(
+            owner=escort,
+            erp_w=5000.0,  # Powerful escort jammer
+            bw_hz=10e6,
+            techniques={"noise", "drfm_multi_false"}
+        )
+        ew_world.add_jammer(escort_jammer)
+
+        # Enemy radar trying to track the package
+        enemy_radar_owner = MockOwner("enemy_radar", "RED", x=10000.0, y=0.0, z=5000.0)
+        enemy_radar = MockRadar(enemy_radar_owner)
+
+        # Calculate jamming effect
+        total_J = ew_world.compute_total_jamming(
+            victim_radar=enemy_radar,
+            t=0.0,
+            victim_position=enemy_radar_owner.position
+        )
+
+        # Escort jammer should provide significant jamming
+        assert total_J > 0.0
+
+        # Check for deception
+        ghosts = ew_world.collect_all_deceptions(
+            victim_radar=enemy_radar,
+            t=0.0,
+            victim_position=enemy_radar_owner.position
+        )
+
+        # DRFM should potentially create ghosts
+        assert isinstance(ghosts, list)
+
+    def test_self_protection_jammer_scenario(self, ew_world):
+        """Test self-protection jammer on aircraft."""
+        # Aircraft with self-protection jammer
+        aircraft = MockOwner("strike1", "BLUE", x=8000.0, y=0.0, z=6000.0)
+        self_protect_jammer = ECMEmitter(
+            owner=aircraft,
+            erp_w=1000.0,  # Typical self-protection power
+            bw_hz=5e6,
+            techniques={"drfm_multi_false"}
+        )
+        ew_world.add_jammer(self_protect_jammer)
+
+        # Enemy SAM radar
+        sam_radar_owner = MockOwner("sam_radar", "RED", x=10000.0, y=0.0, z=0.0)
+        sam_radar = MockRadar(sam_radar_owner)
+
+        total_J = ew_world.compute_total_jamming(
+            victim_radar=sam_radar,
+            t=0.0,
+            victim_position=sam_radar_owner.position
+        )
+
+        # Self-protection jammer provides jamming against threat radar
+        assert total_J > 0.0
