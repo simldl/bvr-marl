@@ -18,10 +18,10 @@ This repository implements a sophisticated Beyond Visual Range (BVR) air combat 
 ## Example Scenarios
 
 <!-- Video: Basic 2v2 BVR Engagement -->
-[*Example video: 2v2 engagement with trained agents in Tacview*]([https://github.com/simldl/air_to_air_rl/issues/4#issue-3795996273](https://github.com/simldl/bvr-marl/issues/1#issue-3796409331))
+[*Example video: 2v2 engagement with trained agents in Tacview*](https://github.com/simldl/bvr-marl/issues/1#issue-3796409331)
 
 <!-- Video: Complex 4v4 Multi-Agent Scenario -->
-[*Example video: 2v2 engagement with trained agents with custom visualization*]([https://github.com/simldl/air_to_air_rl/issues/5#issue-3796003331](https://github.com/simldl/bvr-marl/issues/2#issue-3796412394))
+[*Example video: 2v2 engagement with trained agents with custom visualization*](https://github.com/simldl/bvr-marl/issues/2#issue-3796412394)
 
 ---
 
