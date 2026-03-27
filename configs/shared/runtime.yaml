@@ -1,0 +1,19 @@
+# Shared runtime defaults — worker counts and compute resource settings.
+# Loaded as base values; individual training configs override as needed.
+# See also configs/shared/paths.yaml for output directory defaults.
+
+# Ray / RLlib environment runners
+num_env_runners: 4                 # Parallel rollout workers
+rollout_fragment_length: 128       # Steps per worker before collecting a batch
+batch_mode: complete_episodes      # truncate_episodes | complete_episodes
+
+# Learner / GPU
+num_gpus: 1                        # Set 0 to force CPU
+num_learners: 0                    # 0 = learner in driver process (no separate learner worker)
+num_gpus_per_learner: 0
+
+# Ray actor options
+sample_timeout_s: 600.0            # Worker timeout before Ray raises an error
+
+# Windows-specific
+# Set PL_TORCH_DISTRIBUTED_BACKEND=gloo in environment if training on Windows

@@ -1,0 +1,17 @@
+[browser]
+gatherUsageStats = false
+
+[global]
+developmentMode = false
+
+[server]
+headless = false
+enableCORS = false
+enableXsrfProtection = false
+runOnSave = false
+
+[runner]
+magicEnabled = false
+
+[theme]
+base = "dark"

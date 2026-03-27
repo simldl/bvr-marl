@@ -5,10 +5,11 @@ Tests countermeasure systems: flares, chaff, ECM, and decoys.
 """
 
 import pytest
+
+from air_to_air_rl.aircrafts.control.countermeasure import AircraftCountermeasureSystem
+from air_to_air_rl.aircrafts.control.countermeasure_objects import Chaff, Decoy, Flare
 from tests.mocks.aircraft import MockAircraft
 from tests.mocks.simulator import MockSimulator
-from aircrafts.control.countermeasure import AircraftCountermeasureSystem
-from aircrafts.control.countermeasure_objects import Flare, Chaff, Decoy
 
 
 @pytest.fixture
@@ -38,10 +39,11 @@ def countermeasure_system(mock_aircraft):
 # COUNTERMEASURE SYSTEM INITIALIZATION TESTS
 # ============================================================================
 
+
 def test_countermeasure_system_initialization(mock_aircraft):
     """Test countermeasure system initialization."""
     cms = AircraftCountermeasureSystem(mock_aircraft)
-    
+
     # Test system exists
     assert cms is not None
     assert cms.parent == mock_aircraft
@@ -57,12 +59,13 @@ def test_countermeasure_system_parent_reference(countermeasure_system, mock_airc
 # FLARE SYSTEM TESTS
 # ============================================================================
 
+
 def test_flare_launch_basic(countermeasure_system, mock_simulator):
     """Test basic flare launch functionality."""
     cms = countermeasure_system
 
     # Test flare launch method exists
-    assert hasattr(cms, 'launch_flares')
+    assert hasattr(cms, "launch_flares")
     assert callable(cms.launch_flares)
 
     # Test flare launch with simulator
@@ -113,12 +116,13 @@ def test_flare_depletion_handling(mock_aircraft, mock_simulator):
 # CHAFF SYSTEM TESTS
 # ============================================================================
 
+
 def test_chaff_launch_basic(countermeasure_system, mock_simulator):
     """Test basic chaff launch functionality."""
     cms = countermeasure_system
 
     # Test chaff launch method exists
-    assert hasattr(cms, 'launch_chaff')
+    assert hasattr(cms, "launch_chaff")
     assert callable(cms.launch_chaff)
 
     # Test chaff launch with simulator
@@ -169,17 +173,18 @@ def test_chaff_depletion_handling(mock_aircraft, mock_simulator):
 # ECM SYSTEM TESTS
 # ============================================================================
 
+
 def test_ecm_activation_basic(countermeasure_system):
     """Test basic ECM activation functionality."""
     cms = countermeasure_system
-    
+
     # Test ECM activation method exists
-    assert hasattr(cms, 'activate_ecm')
+    assert hasattr(cms, "activate_ecm")
     assert callable(cms.activate_ecm)
-    
+
     # Test ECM activation
     try:
-        result = cms.activate_ecm()
+        cms.activate_ecm()
         # Should not raise exception
     except Exception as e:
         pytest.skip(f"ECM activation not implemented: {e}")
@@ -188,13 +193,13 @@ def test_ecm_activation_basic(countermeasure_system):
 def test_ecm_duration_management(mock_aircraft):
     """Test ECM duration and usage management."""
     cms = AircraftCountermeasureSystem(mock_aircraft)
-    
-    if hasattr(cms, 'activate_ecm'):
+
+    if hasattr(cms, "activate_ecm"):
         # Test multiple ECM activations
         for _ in range(3):
             try:
                 cms.activate_ecm()
-            except:
+            except Exception:
                 pass  # May not be fully implemented
 
 
@@ -202,10 +207,10 @@ def test_ecm_depletion_handling(mock_aircraft):
     """Test ECM depletion handling."""
     cms = AircraftCountermeasureSystem(mock_aircraft)
     mock_aircraft.ecm = 0  # No ECM uses left
-    
-    if hasattr(cms, 'activate_ecm'):
+
+    if hasattr(cms, "activate_ecm"):
         try:
-            result = cms.activate_ecm()
+            cms.activate_ecm()
             # Should handle gracefully when ECM depleted
         except Exception:
             # Should not crash
@@ -216,12 +221,13 @@ def test_ecm_depletion_handling(mock_aircraft):
 # DECOY SYSTEM TESTS
 # ============================================================================
 
+
 def test_decoy_deployment_basic(countermeasure_system, mock_simulator):
     """Test basic decoy deployment functionality."""
     cms = countermeasure_system
 
     # Test decoy deployment method exists
-    assert hasattr(cms, 'deploy_decoys')
+    assert hasattr(cms, "deploy_decoys")
     assert callable(cms.deploy_decoys)
 
     # Test decoy deployment with simulator
@@ -272,13 +278,14 @@ def test_decoy_depletion_handling(mock_aircraft, mock_simulator):
 # INTEGRATED COUNTERMEASURE TESTS
 # ============================================================================
 
+
 def test_multiple_countermeasure_usage(countermeasure_system):
     """Test using multiple countermeasures simultaneously."""
     cms = countermeasure_system
-    
+
     # Test launching multiple countermeasures in sequence
-    countermeasures = ['launch_flares', 'launch_chaff', 'activate_ecm', 'deploy_decoys']
-    
+    countermeasures = ["launch_flares", "launch_chaff", "activate_ecm", "deploy_decoys"]
+
     for cm_method in countermeasures:
         if hasattr(cms, cm_method):
             try:
@@ -291,14 +298,14 @@ def test_multiple_countermeasure_usage(countermeasure_system):
 
 def test_countermeasure_status_tracking(mock_aircraft):
     """Test countermeasure status and inventory tracking."""
-    cms = AircraftCountermeasureSystem(mock_aircraft)
-    
+    AircraftCountermeasureSystem(mock_aircraft)
+
     # Test that parent aircraft maintains countermeasure counts
-    assert hasattr(mock_aircraft, 'flares')
-    assert hasattr(mock_aircraft, 'chaff')
-    assert hasattr(mock_aircraft, 'ecm')
-    assert hasattr(mock_aircraft, 'decoys')
-    
+    assert hasattr(mock_aircraft, "flares")
+    assert hasattr(mock_aircraft, "chaff")
+    assert hasattr(mock_aircraft, "ecm")
+    assert hasattr(mock_aircraft, "decoys")
+
     # Test initial values
     assert mock_aircraft.flares >= 0
     assert mock_aircraft.chaff >= 0
@@ -309,21 +316,21 @@ def test_countermeasure_status_tracking(mock_aircraft):
 def test_countermeasure_effectiveness_factors(countermeasure_system):
     """Test countermeasure effectiveness factors (if implemented)."""
     cms = countermeasure_system
-    
+
     # Test if system has effectiveness tracking
-    if hasattr(cms, 'get_effectiveness'):
+    if hasattr(cms, "get_effectiveness"):
         try:
             effectiveness = cms.get_effectiveness()
             assert isinstance(effectiveness, (int, float, dict))
-        except:
+        except Exception:
             pass  # May not be implemented
-    
+
     # Test if system tracks active countermeasures
-    if hasattr(cms, 'get_active_countermeasures'):
+    if hasattr(cms, "get_active_countermeasures"):
         try:
             active = cms.get_active_countermeasures()
             assert isinstance(active, (list, dict, set))
-        except:
+        except Exception:
             pass  # May not be implemented
 
 
@@ -331,11 +338,12 @@ def test_countermeasure_effectiveness_factors(countermeasure_system):
 # ERROR HANDLING TESTS
 # ============================================================================
 
+
 def test_countermeasure_error_handling():
     """Test countermeasure system error handling."""
     # Test handling of invalid parent
     try:
-        invalid_cms = AircraftCountermeasureSystem(None)
+        AircraftCountermeasureSystem(None)
         # Should handle gracefully or raise appropriate exception
     except Exception as e:
         # Should raise appropriate exception, not crash
@@ -345,19 +353,19 @@ def test_countermeasure_error_handling():
 def test_countermeasure_boundary_conditions(mock_aircraft):
     """Test countermeasure system boundary conditions."""
     cms = AircraftCountermeasureSystem(mock_aircraft)
-    
+
     # Test with zero countermeasures
     mock_aircraft.flares = 0
     mock_aircraft.chaff = 0
     mock_aircraft.ecm = 0
     mock_aircraft.decoys = 0
-    
-    countermeasures = ['launch_flares', 'launch_chaff', 'activate_ecm', 'deploy_decoys']
+
+    countermeasures = ["launch_flares", "launch_chaff", "activate_ecm", "deploy_decoys"]
     for cm_method in countermeasures:
         if hasattr(cms, cm_method):
             try:
                 method = getattr(cms, cm_method)
-                result = method()
+                method()
                 # Should handle zero inventory gracefully
             except Exception:
                 # Should not crash on zero inventory
@@ -368,30 +376,31 @@ def test_countermeasure_boundary_conditions(mock_aircraft):
 # INTEGRATION TESTS
 # ============================================================================
 
+
 def test_countermeasure_aircraft_integration(mock_aircraft):
     """Test countermeasure system integration with aircraft."""
     cms = AircraftCountermeasureSystem(mock_aircraft)
-    
+
     # Test that system maintains reference to parent
     assert cms.parent == mock_aircraft
-    
+
     # Test that aircraft can access countermeasure system
     mock_aircraft.countermeasures = cms
     assert mock_aircraft.countermeasures == cms
-    
+
     # Test that changes to countermeasures affect aircraft state
-    original_flares = mock_aircraft.flares
-    if hasattr(cms, 'launch_flares'):
+    if hasattr(cms, "launch_flares"):
         try:
             cms.launch_flares()
             # Flare count should change (if implemented)
-        except:
+        except Exception:
             pass
 
 
 # ============================================================================
 # COUNTERMEASURE PERSISTENCE TESTS
 # ============================================================================
+
 
 def test_flare_persistence(mock_aircraft, mock_simulator):
     """Test that flares persist in simulation for correct duration."""

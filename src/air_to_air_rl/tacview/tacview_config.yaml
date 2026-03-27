@@ -1,0 +1,14 @@
+# Tacview scenario generation defaults (package fallback).
+# User-editable copy lives at configs/tacview/default.yaml.
+
+model:
+  checkpoint_path: null
+  model_config_path: null
+  train_config_path: null
+
+simulation:
+  frames: 1000
+  acmi_output_path: null
+
+output:
+  progress_interval: 50

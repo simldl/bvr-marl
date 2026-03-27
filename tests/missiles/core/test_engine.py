@@ -1,11 +1,15 @@
 import pytest
-from missiles.core.engine import MissileEngine
+
+from air_to_air_rl.missiles.core.engine import MissileEngine
+
 
 class DummySim:
     def __init__(self):
         self.removed = []
+
     def remove_unit(self, id):
         self.removed.append(id)
+
 
 class DummyMissile:
     def __init__(self):
@@ -14,6 +18,7 @@ class DummyMissile:
         self.phase_manager = type("PM", (), {"get_thrust_kN": lambda self_: 42.0})()
         self.speed = 200.0  # Initial speed above minimum threshold
         self.position = type("Pos", (), {"alt": 5000.0})()  # Above ground
+
 
 def test_engine_fuel_and_thrust():
     missile = DummyMissile()
@@ -34,8 +39,9 @@ def test_engine_fuel_and_thrust():
     assert "missile01" not in sim.removed  # Should not be removed yet (has energy)
 
     # Energy-based removal test - missile loses speed
-    missile.speed = 50.0  # Below minimum effective speed (100 m/s)
+    missile.speed = 30.0  # Below minimum effective speed (50 m/s)
     assert engine.should_remove_missile_on_energy(missile)  # Should indicate removal
+
 
 def test_engine_energy_removal():
     """Test energy-based removal conditions"""
@@ -48,7 +54,7 @@ def test_engine_energy_removal():
     assert not engine.should_remove_missile_on_energy(missile)
 
     # Test 2: Low speed missile should be removed
-    missile.speed = 50.0  # Below 100 m/s threshold
+    missile.speed = 30.0  # Below 50 m/s threshold
     assert engine.should_remove_missile_on_energy(missile)
 
     # Test 3: Missile that hit ground should be removed

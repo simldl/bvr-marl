@@ -1,0 +1,17 @@
+# Visualization Configuration — Video export
+# Optimised for high-quality video recording: high DPI, full episode length.
+# Pass --save-video to write the output file.
+
+checkpoint_path: null
+model_config_path: null
+train_config_path: configs/training/base.yaml
+env_type: bvr
+
+visualization:
+  frames: 1024         # Full episode
+  interval: 50         # ms between frames (20 fps)
+  real_time_speed: false
+  save_video: true     # Always write the video
+  symbol_mode: flying_objects
+  dpi: 300             # High resolution for video export
+  symbol_scale: 2.5

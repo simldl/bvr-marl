@@ -1,0 +1,17 @@
+# Visualization Configuration — Live interactive view
+# Optimised for responsive live playback: lower DPI, faster interval.
+# Suitable for real-time monitoring during or after training.
+
+checkpoint_path: null
+model_config_path: null
+train_config_path: configs/training/base.yaml
+env_type: bvr
+
+visualization:
+  frames: 200          # Shorter run for quick interactive inspection
+  interval: 80         # ms between frames (faster than default for smoother playback)
+  real_time_speed: false
+  save_video: false
+  symbol_mode: flying_objects
+  dpi: 150             # Reduced for faster rendering
+  symbol_scale: 2.0

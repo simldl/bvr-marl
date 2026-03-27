@@ -1,0 +1,83 @@
+env:
+  num_agents_per_team: 2
+  map_size_km: 300
+  max_steps: 1200
+  tick_secs: 1.0
+  debug: false
+  agent_aircraft_type: Eurofighter
+  opponent_aircraft_type: Eurofighter
+  num_ff: 1
+  num_ef: 2
+  num_warn: 4
+  missile_cooldown_s: 3.0
+  early_term_all_enemies_dead: true
+  early_term_mission_complete: true
+  early_term_no_missiles: true
+  use_controlled_geometry: false
+  regime: hot_200km
+  tacview_logfile: null
+  simulation_config:
+    tick_secs: 1.0
+    max_real_time_s: null
+    early_termination:
+      all_enemies_dead: true
+      mission_complete: true
+      no_missiles_remaining: true
+  aircraft_config:
+    agent_type: Eurofighter
+    opponent_type: Eurofighter
+  missile_config:
+    agent_missiles:
+    - AIM120_AMRAAM
+    opponent_missiles:
+    - AIM120_AMRAAM
+  num_fm: 4
+  scenario_config:
+    awacs_config:
+      agent_awacs: true
+      opponent_awacs: true
+      orbit_altitude_m: 10000
+      awacs_non_engageable: true
+  num_agents_per_side: 2
+  map_size: 300
+  boundary_config:
+    enable_boundary: true
+    boundary_size_km: 300
+    violation_penalty: -50.0
+framework: torch
+num_gpus: 1
+training:
+  steps: 30000
+  learning_rate: 0.0003
+  clip_param: 0.2
+  entropy_coef: 0.01
+  vf_loss_coeff: 0.5
+  num_epochs: 5
+  sgd_minibatch_size: 64
+  grad_clip: 1.0
+  use_gae: true
+  lambda: 0.95
+  train_batch_size: 512
+  kl_coeff: 0.2
+  gamma: 0.995
+model:
+  model_config:
+    action_dim: 4
+    action_mask_key: action_mask
+    active_indices:
+    - 0
+    - 1
+    - 2
+    - 3
+    automation_level: balanced
+logging:
+  log_dir: logs
+  save_dir: models
+  model_name: simplified_v1
+  use_tensorboard: true
+hydra:
+  job:
+    chdir: false
+training_mode: simplified
+num_env_runners: 1
+rollout_fragment_length: auto

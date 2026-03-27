@@ -1,30 +1,42 @@
-import pytest
 import numpy as np
+import pytest
 import torch
-from radar.radar import Radar
-from radar.obs.observation import RadarObsGenerator
-from simulator.core.helpers import Position
+
+from air_to_air_rl.radar.obs.observation import RadarObsGenerator
+from air_to_air_rl.radar.radar import Radar
+from air_to_air_rl.simulator.core.helpers import Position
+
 
 class DummyLUT:
     freq_hz = 1e9
-    def get_probability(self, dist, rcs): return 1.0
+
+    def get_probability(self, dist, rcs):
+        return 1.0
+
 
 def make_target(lat=0.0, lon=0.0, alt=1000.0, rcs=1.0):
-    T = type('Tgt', (), {})()
-    T.position = type('Pos', (), {})()
+    T = type("Tgt", (), {})()
+    T.position = type("Pos", (), {})()
     T.position.lat, T.position.lon, T.position.alt = lat, lon, alt
     T.rcs = rcs
     T.orientation = 0.0
     T.velocity = np.zeros(3)
     return T
 
+
 @pytest.fixture
 def obsgen():
     return RadarObsGenerator(
-        horizontal_fov_deg=90, vertical_fov_deg=60, max_range_m=5000,
-        lut=DummyLUT(), snr_threshold_db=0.0, false_alarm_rate=0.0,
-        np_rng=np.random.default_rng(0), device=torch.device("cpu")
+        horizontal_fov_deg=90,
+        vertical_fov_deg=60,
+        max_range_m=5000,
+        lut=DummyLUT(),
+        snr_threshold_db=0.0,
+        false_alarm_rate=0.0,
+        np_rng=np.random.default_rng(0),
+        device=torch.device("cpu"),
     )
+
 
 def test_generate_one_detection(obsgen):
     own_pos = make_target()
@@ -33,22 +45,48 @@ def test_generate_one_detection(obsgen):
     assert len(dets) == 1
     assert "az" in dets[0] and "el" in dets[0]
 
-@pytest.mark.skip(reason="False alarms deprecated - now handled by ECM/jamming system in radar.ew module")
-def test_generate_false_alarms(obsgen):
-    # NOTE: False alarm generation has been replaced by the ECM/jamming system
-    # See radar.ew.ecm_emitter and radar.ew.ew_world for the new implementation
-    # This test is kept for reference but marked as skipped
-    obsgen.false_alarm_rate = 5.0
-    obsgen.np_rng = np.random.default_rng(123)
-    dets = obsgen.generate(make_target().position, [], 0, 0)
-    assert len(dets) > 0
-    falses = [d for d in dets if d["T"] is None]
-    assert all(isinstance(f["az"], float) for f in falses)
+
+def test_ecm_jamming_system():
+    """Test ECM/jamming system that replaced false alarms."""
+    # Test the new ECM/jamming system that replaced false alarms
+    try:
+        from air_to_air_rl.radar.ew.ecm_emitter import ECMEmitter
+
+        # Create mock owner (aircraft)
+        class MockOwner:
+            def __init__(self):
+                self.id = 123
+                self.position = Position(lat=0.0, lon=0.0, alt=1000.0)
+
+        mock_owner = MockOwner()
+
+        # Create ECM emitter with correct parameters
+        ecm = ECMEmitter(
+            owner=mock_owner,
+            erp_w=1000.0,  # Effective radiated power
+            bw_hz=10e6,  # Bandwidth in Hz
+            hop_period_s=0.1,
+            techniques={"drfm_multi_false"},
+        )
+
+        # Verify ECM emitter can be created and has expected attributes
+        assert ecm is not None
+        assert hasattr(ecm, "owner")
+        assert hasattr(ecm, "erp_w")
+        assert hasattr(ecm, "bw_hz")
+        assert ecm.owner == mock_owner
+        assert ecm.erp_w == 1000.0
+        assert ecm.bw_hz == 10e6
+        assert "drfm_multi_false" in ecm.techniques
+
+    except ImportError:
+        pytest.skip("ECM/jamming system not available for testing")
 
 
 @pytest.fixture
 def radar_position():
     return Position(lat=0.0, lon=0.0, alt=1_000.0)
+
 
 @pytest.fixture
 def deterministic_radar():
@@ -65,9 +103,12 @@ def deterministic_radar():
         angular_resolution_deg=2.0,
     )
 
+
 def test_detection_boundaries(monkeypatch, deterministic_radar, radar_position):
-    import torch
     from types import SimpleNamespace
+
+    import torch
+
     monkeypatch.setattr(torch, "rand", lambda *s, **kw: torch.zeros(*s, **kw))
 
     radar = deterministic_radar
@@ -75,11 +116,11 @@ def test_detection_boundaries(monkeypatch, deterministic_radar, radar_position):
     # 1. Innerhalb Reichweite und FOV
     target = SimpleNamespace(
         position=Position(
-            lat=radar_position.lat + 0.005,
-            lon=radar_position.lon,
-            alt=radar_position.alt
+            lat=radar_position.lat + 0.005, lon=radar_position.lon, alt=radar_position.alt
         ),
-        orientation=0.0, rcs=2.0, velocity=np.zeros(3)
+        orientation=0.0,
+        rcs=2.0,
+        velocity=np.zeros(3),
     )
     dets = radar.obsgen.generate(radar_position, [target], yaw_deg=0.0, pitch_deg=0.0)
     assert len(dets) == 1
@@ -101,7 +142,7 @@ def test_detection_boundaries(monkeypatch, deterministic_radar, radar_position):
     target.position = Position(
         lat=radar_position.lat + delta_lat,
         lon=radar_position.lon + delta_lon,
-        alt=radar_position.alt
+        alt=radar_position.alt,
     )
     dets = radar.obsgen.generate(radar_position, [target], yaw_deg=0.0, pitch_deg=0.0)
     assert len(dets) == 0
@@ -116,7 +157,7 @@ def test_detection_boundaries(monkeypatch, deterministic_radar, radar_position):
     target.position = Position(
         lat=radar_position.lat + delta_lat,
         lon=radar_position.lon + delta_lon,
-        alt=radar_position.alt
+        alt=radar_position.alt,
     )
     dets = radar.obsgen.generate(radar_position, [target], yaw_deg=0.0, pitch_deg=0.0)
     assert len(dets) == 1

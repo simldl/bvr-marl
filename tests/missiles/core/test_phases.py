@@ -1,5 +1,7 @@
 import pytest
-from missiles.core.phases import MissilePhaseManager
+
+from air_to_air_rl.missiles.core.phases import MissilePhaseManager
+
 
 def test_phase_manager_default_and_update():
     # Default config with motor_burn_s=100
@@ -21,11 +23,12 @@ def test_phase_manager_default_and_update():
     thrust = manager.get_thrust_kN()
     assert thrust == 0.0  # No thrust in terminal phase
 
+
 def test_phase_manager_custom_config():
     phases = {
         "boost": {"duration_s": 5.0, "thrust_kN": 60.0},
         "middle": {"duration_s": 10.0, "thrust_kN": 50.0},
-        "terminal": {"duration_s": 2.0, "thrust_kN": 20.0}
+        "terminal": {"duration_s": 2.0, "thrust_kN": 20.0},
     }
     manager = MissilePhaseManager(phases)
     manager.update(0)

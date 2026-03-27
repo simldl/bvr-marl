@@ -1,0 +1,26 @@
+# Visualization Configuration – AWACS figure-8 scenario
+# Load with:  python visualization/2d_live_view.py --viz_config visualization/configs/viz_config_awacs.yaml
+#
+# Uses random actions for fighters so no checkpoint is required.
+# Both teams have an AWACS flying a 25 km-radius NS figure-8 in the
+# 50 km side zones (blue/west and red/east), giving a total display
+# area of 300 km (EW) × 200 km (NS).
+
+# No trained model – fighters take random actions
+checkpoint_path: null
+model_config_path: null
+
+# Training config that has AWACS enabled
+train_config_path: configs/training/base.yaml
+
+# Environment type: "bvr" for full simulation with AWACS
+env_type: bvr
+
+visualization:
+  frames: 600          # ~10 minutes of sim time at 1 s/tick
+  interval: 50         # ms between frames (fast playback)
+  real_time_speed: false
+  save_video: false
+  symbol_mode: flying_objects  # Symbol rendering: "nato" (MIL-STD-2525C), "flying_objects" (type-specific silhouettes), "procedural" (Cairo shapes)
+  dpi: 400            # Render resolution: 200=default, 300=high, 400=ultra
+  symbol_scale: 1.5   # Sprite magnification: 1.0=original, 2.0=double (default), 3.0=triple

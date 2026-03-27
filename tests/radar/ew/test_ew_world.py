@@ -2,15 +2,18 @@
 Tests for EW (Electronic Warfare) World coordination functionality.
 """
 
-import pytest
-import numpy as np
 import math
-from radar.ew.ew_world import EWWorld
-from radar.ew.ecm_emitter import ECMEmitter
+
+import numpy as np
+import pytest
+
+from air_to_air_rl.radar.ew.ecm_emitter import ECMEmitter
+from air_to_air_rl.radar.ew.ew_world import EWWorld
 
 
 class MockOwner:
     """Mock aircraft/unit owner."""
+
     def __init__(self, unit_id, group, x=0.0, y=0.0, z=5000.0):
         self.id = unit_id
         self.group = group
@@ -22,14 +25,14 @@ class MockOwner:
         lat = ref_lat + (y / 111000.0)  # North offset in degrees
         lon = ref_lon + (x / (111000.0 * math.cos(math.radians(ref_lat))))  # East offset
 
-        self.position = type('Pos', (), {
-            'x': x, 'y': y, 'z': z,
-            'lat': lat, 'lon': lon, 'alt': z
-        })()
+        self.position = type(
+            "Pos", (), {"x": x, "y": y, "z": z, "lat": lat, "lon": lon, "alt": z}
+        )()
 
 
 class MockRadar:
     """Mock radar for testing."""
+
     def __init__(self, owner, jam_susceptible=True):
         self.owner = owner
         self.freq_hz = 10e9
@@ -42,6 +45,7 @@ class MockRadar:
 
 class MockSimulator:
     """Mock simulator for testing EWWorld."""
+
     def __init__(self):
         self.active_units = {}
 
@@ -51,6 +55,7 @@ class MockSimulator:
 
 class MockUnit:
     """Mock unit with ECM capability."""
+
     def __init__(self, unit_id, group, position, ecm=None):
         self.id = unit_id
         self.group = group
@@ -98,10 +103,7 @@ class TestMissileImmunity:
         # Add enemy jammer
         jammer_owner = MockOwner("red1", "RED", x=5000.0, y=0.0, z=5000.0)
         jammer = ECMEmitter(
-            owner=jammer_owner,
-            erp_w=2000.0,
-            bw_hz=2e6,
-            techniques={"drfm_multi_false"}
+            owner=jammer_owner, erp_w=2000.0, bw_hz=2e6, techniques={"drfm_multi_false"}
         )
         unit_with_ecm = MockUnit("red1", "RED", jammer_owner.position, ecm=jammer)
         mock_sim.add_unit("red1", unit_with_ecm)
@@ -129,7 +131,7 @@ class TestSingleJammerScenarios:
             erp_w=2000.0,
             bw_hz=2e6,
             techniques={"drfm_multi_false"},
-            np_rng=np.random.default_rng(42)
+            np_rng=np.random.default_rng(42),
         )
         unit_with_ecm = MockUnit("red1", "RED", jammer_owner.position, ecm=jammer)
         mock_sim.add_unit("red1", unit_with_ecm)
@@ -153,25 +155,22 @@ class TestSingleJammerScenarios:
         assert isinstance(ghosts, list)
         # Ghosts may or may not be generated depending on FOV and randomization
         for ghost in ghosts:
-            assert 'az' in ghost
-            assert 'el' in ghost
-            assert 'd' in ghost
-            assert 'dop' in ghost
-            assert 'is_deception' in ghost
-            assert ghost['is_deception'] is True
-            assert 'engagement_id' in ghost
-            assert 'jammer_id' in ghost
-            assert ghost['T'] is None
+            assert "az" in ghost
+            assert "el" in ghost
+            assert "d" in ghost
+            assert "dop" in ghost
+            assert "is_deception" in ghost
+            assert ghost["is_deception"] is True
+            assert "engagement_id" in ghost
+            assert "jammer_id" in ghost
+            assert ghost["T"] is None
 
     def test_friendly_jammer_no_effect(self, ew_world, mock_sim):
         """Test that friendly jammers don't affect same-group radars."""
         # Add BLUE jammer
         jammer_owner = MockOwner("blue_ecm", "BLUE", x=5000.0, y=0.0, z=5000.0)
         jammer = ECMEmitter(
-            owner=jammer_owner,
-            erp_w=2000.0,
-            bw_hz=2e6,
-            techniques={"drfm_multi_false"}
+            owner=jammer_owner, erp_w=2000.0, bw_hz=2e6, techniques={"drfm_multi_false"}
         )
         unit_with_ecm = MockUnit("blue_ecm", "BLUE", jammer_owner.position, ecm=jammer)
         mock_sim.add_unit("blue_ecm", unit_with_ecm)
@@ -194,12 +193,7 @@ class TestMultipleJammerScenarios:
         """Test jamming from two enemy jammers."""
         # Add RED jammer 1
         jammer1_owner = MockOwner("red1", "RED", x=5000.0, y=0.0, z=5000.0)
-        jammer1 = ECMEmitter(
-            owner=jammer1_owner,
-            erp_w=1500.0,
-            bw_hz=1.5e6,
-            techniques={"noise"}
-        )
+        jammer1 = ECMEmitter(owner=jammer1_owner, erp_w=1500.0, bw_hz=1.5e6, techniques={"noise"})
         unit1 = MockUnit("red1", "RED", jammer1_owner.position, ecm=jammer1)
         mock_sim.add_unit("red1", unit1)
 
@@ -210,7 +204,7 @@ class TestMultipleJammerScenarios:
             erp_w=1500.0,
             bw_hz=1.5e6,
             techniques={"drfm_multi_false"},
-            np_rng=np.random.default_rng(123)
+            np_rng=np.random.default_rng(123),
         )
         unit2 = MockUnit("red2", "RED", jammer2_owner.position, ecm=jammer2)
         mock_sim.add_unit("red2", unit2)
@@ -344,7 +338,7 @@ class TestDeceptionGeneration:
             erp_w=2000.0,
             bw_hz=2e6,
             techniques={"drfm_multi_false"},
-            np_rng=np.random.default_rng(42)
+            np_rng=np.random.default_rng(42),
         )
         unit = MockUnit("red1", "RED", jammer_owner.position, ecm=jammer)
         mock_sim.add_unit("red1", unit)
@@ -358,19 +352,19 @@ class TestDeceptionGeneration:
         # Check ghost structure
         for ghost in ghosts:
             assert isinstance(ghost, dict)
-            assert 'az' in ghost
-            assert 'el' in ghost
-            assert 'd' in ghost
-            assert 'dop' in ghost
-            assert 'snr_db' in ghost
-            assert 'is_deception' in ghost
-            assert ghost['is_deception'] is True
-            assert 'engagement_id' in ghost
-            assert ghost['engagement_id'] == jammer_owner.id
-            assert 'jammer_id' in ghost
-            assert ghost['jammer_id'] == jammer_owner.id
-            assert 'T' in ghost
-            assert ghost['T'] is None
+            assert "az" in ghost
+            assert "el" in ghost
+            assert "d" in ghost
+            assert "dop" in ghost
+            assert "snr_db" in ghost
+            assert "is_deception" in ghost
+            assert ghost["is_deception"] is True
+            assert "engagement_id" in ghost
+            assert ghost["engagement_id"] == jammer_owner.id
+            assert "jammer_id" in ghost
+            assert ghost["jammer_id"] == jammer_owner.id
+            assert "T" in ghost
+            assert ghost["T"] is None
 
     def test_no_deception_without_drfm(self, ew_world, mock_sim):
         """Test that jammers without DRFM don't generate ghosts."""
@@ -380,7 +374,7 @@ class TestDeceptionGeneration:
             owner=jammer_owner,
             erp_w=2000.0,
             bw_hz=2e6,
-            techniques={"noise"}  # No DRFM
+            techniques={"noise"},  # No DRFM
         )
         unit = MockUnit("red1", "RED", jammer_owner.position, ecm=jammer)
         mock_sim.add_unit("red1", unit)
@@ -411,11 +405,7 @@ class TestAssistScheduling:
 
         # Should not crash
         ew_world.schedule_assist(
-            own_radar=radar,
-            team_radars=[],
-            enemy_tracks=enemy_tracks,
-            t=0.0,
-            K=2
+            own_radar=radar, team_radars=[], enemy_tracks=enemy_tracks, t=0.0, K=2
         )
 
     def test_schedule_assist_with_tracks(self, ew_world, mock_sim):
@@ -430,9 +420,9 @@ class TestAssistScheduling:
         tid = 1
         state = np.array([5000.0, 0.0, 5000.0, 0.0, 0.0, 0.0])
         cov = np.eye(6)
-        tgt = type('Target', (), {'id': 'red1'})()
-        utype = 'aircraft'
-        ref = type('Ref', (), {})()
+        tgt = type("Target", (), {"id": "red1"})()
+        utype = "aircraft"
+        ref = type("Ref", (), {})()
         confidence = 0.9
         n_obs = 10
         lifetime = 10
@@ -443,19 +433,29 @@ class TestAssistScheduling:
         jammer_id = None
         engageable = True
 
-        track = (tid, state, cov, tgt, utype, ref, confidence, n_obs,
-                 lifetime, update_count, is_deception, suspect_deception,
-                 engagement_id, jammer_id, engageable)
+        track = (
+            tid,
+            state,
+            cov,
+            tgt,
+            utype,
+            ref,
+            confidence,
+            n_obs,
+            lifetime,
+            update_count,
+            is_deception,
+            suspect_deception,
+            engagement_id,
+            jammer_id,
+            engageable,
+        )
 
         enemy_tracks = [track]
 
         # Should not crash
         ew_world.schedule_assist(
-            own_radar=radar,
-            team_radars=[],
-            enemy_tracks=enemy_tracks,
-            t=0.0,
-            K=2
+            own_radar=radar, team_radars=[], enemy_tracks=enemy_tracks, t=0.0, K=2
         )
 
 
@@ -464,7 +464,7 @@ class TestEdgeCases:
 
     def test_radar_without_owner(self, ew_world):
         """Test handling radar without owner."""
-        radar = type('Radar', (), {'jam_susceptible': True})()
+        radar = type("Radar", (), {"jam_susceptible": True})()
         # No owner attribute
 
         jammer_info, ghosts = ew_world.collect_incoming(radar, t=0.0)
@@ -476,13 +476,9 @@ class TestEdgeCases:
     def test_owner_without_position(self, ew_world):
         """Test handling owner without position."""
         # Create owner without position attribute
-        owner = type('Owner', (), {'id': 'test', 'group': 'BLUE'})()
+        owner = type("Owner", (), {"id": "test", "group": "BLUE"})()
         # Create radar manually without using MockRadar to avoid position creation
-        radar = type('Radar', (), {
-            'owner': owner,
-            'jam_susceptible': True,
-            'freq_hz': 10e9
-        })()
+        radar = type("Radar", (), {"owner": owner, "jam_susceptible": True, "freq_hz": 10e9})()
 
         jammer_info, ghosts = ew_world.collect_incoming(radar, t=0.0)
 
@@ -520,7 +516,7 @@ class TestRealisticScenarios:
             erp_w=5000.0,  # Powerful escort jammer
             bw_hz=10e6,
             techniques={"noise", "drfm_multi_false"},
-            np_rng=np.random.default_rng(789)
+            np_rng=np.random.default_rng(789),
         )
         escort = MockUnit("blue_escort", "BLUE", escort_owner.position, ecm=escort_jammer)
         mock_sim.add_unit("blue_escort", escort)
@@ -544,10 +540,7 @@ class TestRealisticScenarios:
         # BLUE jammer
         blue_owner = MockOwner("blue1", "BLUE", x=-3000.0, y=0.0, z=6000.0)
         blue_jammer = ECMEmitter(
-            owner=blue_owner,
-            erp_w=2000.0,
-            bw_hz=2e6,
-            techniques={"drfm_multi_false"}
+            owner=blue_owner, erp_w=2000.0, bw_hz=2e6, techniques={"drfm_multi_false"}
         )
         blue_unit = MockUnit("blue1", "BLUE", blue_owner.position, ecm=blue_jammer)
         mock_sim.add_unit("blue1", blue_unit)
@@ -555,10 +548,7 @@ class TestRealisticScenarios:
         # RED jammer
         red_owner = MockOwner("red1", "RED", x=3000.0, y=0.0, z=6000.0)
         red_jammer = ECMEmitter(
-            owner=red_owner,
-            erp_w=2000.0,
-            bw_hz=2e6,
-            techniques={"drfm_multi_false"}
+            owner=red_owner, erp_w=2000.0, bw_hz=2e6, techniques={"drfm_multi_false"}
         )
         red_unit = MockUnit("red1", "RED", red_owner.position, ecm=red_jammer)
         mock_sim.add_unit("red1", red_unit)

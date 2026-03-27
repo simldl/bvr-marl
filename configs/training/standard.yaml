@@ -1,0 +1,90 @@
+# Standard BVR training configuration (public baseline).
+# Uses the public reward baseline and Ray RLlib's default network.
+env:
+  num_agents_per_side: 2
+  map_size: 200  # 200km x 200km arena
+  max_steps: 1024
+  debug: false
+
+  # Observation composition
+  num_fm: 4
+  num_ff: 2
+  num_em: 4
+  num_enemy: 2
+  pr_slots: 2
+  warn_sectors: 4
+
+  simulation_config:
+    tick_secs: 1
+    max_real_time_s: null
+    early_termination:
+      all_enemies_dead: true
+      mission_complete: true
+      no_missiles_remaining: true
+
+    fix_radar_lock_after_first_obs: false
+    lock_fix_duration_s: 0.0
+    force_locks_all_enemies: false
+
+
+  aircraft_config:
+    agent_type: Eurofighter
+    opponent_type: Eurofighter
+
+  weapon_config:
+    missile_hit_radius_m: 500.0
+    gun_hit_radius_m: 5.0
+
+  missile_config:
+    agent_missiles:
+      - AIM120_AMRAAM
+    opponent_missiles:
+      - AIM120_AMRAAM
+
+  loadout_config: null
+
+
+framework: torch
+num_gpus: 0
+seed: 42
+
+model:
+  automation_level: 1
+    enable_target_selection: true
+    enable_gun_control: true
+    enable_missile_automation: true
+    active_indices: [0, 1, 2, 4]
+
+  model_config:
+    action_dim: 4
+    active_indices: [0, 1, 2, 4]
+
+num_env_runners: 4
+
+training:
+  steps: 500
+  learning_rate: 0.0003
+  train_batch_size: 2000
+  sgd_minibatch_size: 256
+  clip_param: 0.2
+  entropy_coef: 0.01
+  kl_coeff: 0.0
+  vf_loss_coeff: 0.5
+  num_epochs: 4
+  use_gae: true
+  lambda: 0.95
+  gamma: 0.99
+
+logging:
+  log_dir: logs
+  save_dir: models
+  model_name: bvr_public_baseline
+
+resume_checkpoint: null
+load_weights_from_checkpoint: null
+
+hydra:
+  job:
+    chdir: false
+
+training_mode: bvr

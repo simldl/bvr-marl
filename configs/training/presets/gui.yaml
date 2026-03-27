@@ -1,0 +1,100 @@
+env:
+  num_agents_per_side: 2
+  map_size: 300
+  max_steps: 1024
+  debug: false
+  simulation_config:
+    tick_secs: 1.0
+    max_real_time_s: null
+    early_termination:
+      all_enemies_dead: true
+      mission_complete: true
+      no_missiles_remaining: false
+  weapon_config:
+    missile_hit_radius_m: 500.0
+    gun_hit_radius_m: 5.0
+    enable_gun: false
+  aircraft_config:
+    agent_type: Eurofighter
+    opponent_type: Eurofighter
+  missile_config:
+    agent_missiles:
+    - AIM120_AMRAAM
+    opponent_missiles:
+    - AIM120_AMRAAM
+  loadout_config: null
+  datalink_mode: full
+  geometry_config:
+    use_controlled_geometry: false
+    regime: hot_120km
+    formation_spread_m: 2000.0
+    position_noise_m: 0.0
+    altitude_noise_m: 0.0
+    heading_noise_deg: 0.0
+  scenario_config:
+    allowed_regimes: []
+    randomize_regime: true
+    awacs_config:
+      agent_awacs: true
+      opponent_awacs: true
+      orbit_altitude_m: 10000
+      orbit_speed_mps: 200.0
+      orbit_pattern: figure8
+      orbit_radius_km: 25.0
+      orbit_leg_length_km: 40.0
+      orbit_clockwise: true
+      lock_fov_deg: 60.0
+      awacs_non_engageable: true
+  metrics_config:
+    enable_metrics: false
+    output_dir: study_results
+    export_interval: 100
+  num_fm: 6
+  boundary_config:
+    enable_boundary: true
+    boundary_size_km: 200
+    violation_penalty: -50.0
+framework: torch
+num_gpus: 1
+num_env_runners: 30
+rollout_fragment_length: auto
+inference_config:
+  framework: torch
+training:
+  steps: 4048
+  learning_rate: 0.0003
+  train_batch_size: 4096
+  sgd_minibatch_size: 128
+  num_epochs: 3
+  clip_param: 0.2
+  entropy_coef: 0.01
+  vf_loss_coeff: 0.5
+  kl_coeff: 0.2
+  gamma: 0.995
+  grad_clip: 1.0
+  use_gae: true
+  lambda: 0.95
+model:
+    wrapped_action_dim: 4
+    full_action_dim: 10
+    automation_level: balanced
+    enable_countermeasures: true
+    enable_target_selection: true
+    enable_gun_control: true
+  model_config:
+    action_dim: 4
+    action_mask_key: action_mask
+    active_indices:
+    - 0
+    - 1
+    - 2
+    - 3
+logging:
+  log_dir: logs
+  save_dir: models
+  model_name: test
+  use_tensorboard: true
+hydra:
+  job:
+    chdir: false
+training_mode: simplified

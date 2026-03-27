@@ -1,0 +1,26 @@
+# GUI default configuration — BVR-MARL Control Panel startup preferences.
+# Loaded on GUI launch; override by editing this file.
+
+# Which tab to show on startup: training | visualization | tacview | tensorboard
+startup_tab: training
+
+# Training panel defaults
+training:
+  default_config: aggressive          # Config pre-selected in the dropdown
+  auto_refresh_interval_s: 5         # How often the process monitor polls (seconds)
+  show_archived_configs: false        # Whether to include configs/training/archived/ in the list
+
+# Visualization panel defaults
+visualization:
+  default_config: default             # Viz config pre-selected in the dropdown
+  default_mode: standard              # Visualization mode: standard | behavior-tree | commands
+
+# TensorBoard panel defaults
+tensorboard:
+  default_port: 6006
+  auto_launch: false                  # Launch TensorBoard automatically when GUI starts
+
+# Display
+display:
+  theme: dark
+  sidebar_expanded: true

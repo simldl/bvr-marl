@@ -10,36 +10,30 @@ This test:
 """
 
 import sys
-import os
-
-# Add project root to path
-project_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, project_root)
+from datetime import datetime
 
 import numpy as np
-from datetime import datetime
-from simulator.simulator import Simulator
-from simulator.core.units import Position
-from aircrafts.types.eurofighter import Eurofighter
-from missiles.fox3.amraam import AIM120_AMRAAM
+
+from air_to_air_rl.aircrafts.types.eurofighter import Eurofighter
+from air_to_air_rl.missiles.fox3.amraam import AIM120_AMRAAM
+from air_to_air_rl.simulator.core.units import Position
+from air_to_air_rl.simulator.simulator import Simulator
+
 
 def test_auto_fire_controlled():
     """Test automated missile firing with controlled geometry."""
 
-    print("="*80)
+    print("=" * 80)
     print("CONTROLLED AUTO-FIRE TEST - FAVORABLE GEOMETRY")
-    print("="*80)
+    print("=" * 80)
 
     # Create simulator
     weapon_config = {
-        'missile_hit_radius_m': 500.0,
-        'gun_hit_radius_m': 5.0,
+        "missile_hit_radius_m": 500.0,
+        "gun_hit_radius_m": 5.0,
     }
     simulator = Simulator(
-        utc_time=datetime.now(),
-        tick_secs=1,
-        random_seed=42,
-        weapon_config=weapon_config
+        utc_time=datetime.now(), tick_secs=1, random_seed=42, weapon_config=weapon_config
     )
 
     print("\n[SETUP] Creating agents in favorable geometry...")
@@ -62,13 +56,13 @@ def test_auto_fire_controlled():
     # Create agent aircraft (facing east)
     agent_pos = Position(lat=0.0, lon=0.0, alt=10000.0)
     agent = Eurofighter(
-        agent_pos,          # position
-        90.0,               # yaw_deg (heading east)
-        250.0,              # speed_mps
-        "BLUE",             # group
-        map_limits,         # map_limits
-        0.0,                # min_alt_m
-        20000.0             # max_alt_m
+        agent_pos,  # position
+        90.0,  # yaw_deg (heading east)
+        250.0,  # speed_mps
+        "BLUE",  # group
+        map_limits,  # map_limits
+        0.0,  # min_alt_m
+        20000.0,  # max_alt_m
     )
     agent.missile_types = [AIM120_AMRAAM]
     agent_id = simulator.add_unit(agent)
@@ -76,13 +70,13 @@ def test_auto_fire_controlled():
     # Create enemy aircraft (facing west, ~22km away)
     enemy_pos = Position(lat=0.0, lon=0.2, alt=10000.0)  # ~22km east
     enemy = Eurofighter(
-        enemy_pos,          # position
-        270.0,              # yaw_deg (heading west toward agent)
-        250.0,              # speed_mps
-        "RED",              # group
-        map_limits,         # map_limits
-        0.0,                # min_alt_m
-        20000.0             # max_alt_m
+        enemy_pos,  # position
+        270.0,  # yaw_deg (heading west toward agent)
+        250.0,  # speed_mps
+        "RED",  # group
+        map_limits,  # map_limits
+        0.0,  # min_alt_m
+        20000.0,  # max_alt_m
     )
     enemy.missile_types = [AIM120_AMRAAM]
     enemy_id = simulator.add_unit(enemy)
@@ -90,25 +84,26 @@ def test_auto_fire_controlled():
     print(f"\n[OK] Agent ID: {agent_id}, Enemy ID: {enemy_id}")
 
     # Configure auto-fire on agent
-    from reinforcement_learning.environment.spaces.action_space import ActionProcessor
+    from air_to_air_rl.rl.environment.spaces.action_space import ActionProcessor
+
     action_processor = ActionProcessor(simulator)
     action_processor.configure_automation(
         enable_missile_automation=True,
         missile_auto_sqi_threshold=0.3,
         missile_auto_max_per_target=2,
-        missile_auto_long_cooldown_s=10.0
+        missile_auto_long_cooldown_s=10.0,
     )
 
     print("\n[OK] Auto-fire configured:")
-    print(f"  Enabled: True")
-    print(f"  SQI threshold: 0.3")
-    print(f"  Max missiles per target: 2")
-    print(f"  Long cooldown: 10.0s")
+    print("  Enabled: True")
+    print("  SQI threshold: 0.3")
+    print("  Max missiles per target: 2")
+    print("  Long cooldown: 10.0s")
 
     # Test scenario
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("RUNNING TEST - STEP BY STEP")
-    print("="*80)
+    print("=" * 80)
 
     missiles_fired = 0
     step_count = 0
@@ -121,14 +116,14 @@ def test_auto_fire_controlled():
     print("\n[STEP 0] Initial positions set")
 
     # Check initial SQI
-    if hasattr(agent, 'metrics') and hasattr(agent.metrics, 'get_sqi'):
+    if hasattr(agent, "metrics") and hasattr(agent.metrics, "get_sqi"):
         try:
             sqi_result = agent.metrics.get_sqi(enemy)
-            if sqi_result.get('valid', False):
-                initial_sqi = sqi_result.get('sqi', 0.0)
+            if sqi_result.get("valid", False):
+                initial_sqi = sqi_result.get("sqi", 0.0)
                 print(f"  Initial SQI: {initial_sqi:.3f}")
             else:
-                error = sqi_result.get('error', 'unknown')
+                error = sqi_result.get("error", "unknown")
                 print(f"  Initial SQI invalid: {error}")
         except Exception as e:
             print(f"  Initial SQI check failed: {e}")
@@ -144,24 +139,24 @@ def test_auto_fire_controlled():
         # Check training signals
         signals = action_processor.get_training_signals(agent_id)
 
-        if signals['valid_missile_fires'] > 0:
-            missiles_fired += signals['valid_missile_fires']
+        if signals["valid_missile_fires"] > 0:
+            missiles_fired += signals["valid_missile_fires"]
             print(f"\n[STEP {step_count}] ✓ MISSILE FIRED!")
             print(f"  Total missiles fired: {missiles_fired}")
 
             # Get SQI at time of fire
-            if hasattr(agent, 'metrics') and hasattr(agent.metrics, 'get_sqi'):
+            if hasattr(agent, "metrics") and hasattr(agent.metrics, "get_sqi"):
                 try:
                     sqi_result = agent.metrics.get_sqi(enemy)
-                    if sqi_result.get('valid', False):
-                        sqi_at_fire = sqi_result.get('sqi', 0.0)
+                    if sqi_result.get("valid", False):
+                        sqi_at_fire = sqi_result.get("sqi", 0.0)
                         print(f"  SQI at fire: {sqi_at_fire:.3f}")
                         if sqi_at_fire >= 0.3:
-                            print(f"  [OK] SQI above threshold (0.3)")
+                            print("  [OK] SQI above threshold (0.3)")
                         else:
-                            print(f"  [ERROR] SQI below threshold! Should not have fired!")
+                            print("  [ERROR] SQI below threshold! Should not have fired!")
                     else:
-                        error = sqi_result.get('error', 'unknown')
+                        error = sqi_result.get("error", "unknown")
                         print(f"  SQI invalid: {error}")
                 except Exception as e:
                     print(f"  Could not get SQI: {e}")
@@ -172,16 +167,16 @@ def test_auto_fire_controlled():
 
             # Check cooldown
             agent_state = action_processor.agent_states.get(agent_id, {})
-            cooldown = agent_state.get('missile_cooldown_left_s', 0)
+            cooldown = agent_state.get("missile_cooldown_left_s", 0)
             print(f"  Cooldown set: {cooldown:.1f}s")
 
             if missiles_at_target >= 2:
                 if cooldown == 10.0:
-                    print(f"  [OK] Long cooldown (10s) applied after 2nd missile")
+                    print("  [OK] Long cooldown (10s) applied after 2nd missile")
                 else:
                     print(f"  [ERROR] Expected long cooldown (10s), got {cooldown:.1f}s")
 
-        elif signals['vetoed_missile_attempts'] > 0:
+        elif signals["vetoed_missile_attempts"] > 0:
             # Auto-fire tried but was vetoed
             if step_count <= 5:  # Only log first few vetos
                 print(f"[STEP {step_count}] Auto-fire vetoed")
@@ -194,9 +189,9 @@ def test_auto_fire_controlled():
             print(f"\n[STEP {step_count}] Test complete - fired {missiles_fired} missiles")
             break
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("TEST RESULTS")
-    print("="*80)
+    print("=" * 80)
     print(f"Steps completed: {step_count}")
     print(f"Missiles fired: {missiles_fired}")
 
@@ -230,49 +225,50 @@ def test_auto_fire_controlled():
         success = False
 
     # Test SQI directly
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("SQI VERIFICATION")
-    print("="*80)
+    print("=" * 80)
 
-    if hasattr(agent, 'metrics') and hasattr(agent.metrics, 'get_sqi'):
+    if hasattr(agent, "metrics") and hasattr(agent.metrics, "get_sqi"):
         try:
             sqi_result = agent.metrics.get_sqi(enemy)
 
-            if sqi_result.get('valid', False):
-                final_sqi = sqi_result.get('sqi', 0.0)
+            if sqi_result.get("valid", False):
+                final_sqi = sqi_result.get("sqi", 0.0)
                 print(f"Final SQI: {final_sqi:.3f}")
-                print(f"Threshold: 0.3")
+                print("Threshold: 0.3")
 
                 if final_sqi >= 0.3:
                     print("[OK] SQI above threshold - should trigger auto-fire")
                 else:
                     print("[INFO] SQI below threshold - auto-fire correctly vetoed")
             else:
-                error = sqi_result.get('error', 'unknown')
+                error = sqi_result.get("error", "unknown")
                 print(f"[ERROR] SQI calculation invalid: {error}")
                 success = False
         except Exception as e:
             print(f"[ERROR] SQI calculation failed: {e}")
             import traceback
+
             traceback.print_exc()
             success = False
     else:
         print("[ERROR] No SQI calculation method found!")
         print("  Agent attributes:")
         print(f"  - has 'metrics': {hasattr(agent, 'metrics')}")
-        if hasattr(agent, 'metrics'):
+        if hasattr(agent, "metrics"):
             print(f"  - metrics.get_sqi: {hasattr(agent.metrics, 'get_sqi')}")
         success = False
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     if success:
-        print("✓ ALL TESTS PASSED")
+        print("PASS ALL TESTS PASSED")
     else:
-        print("✗ SOME TESTS FAILED - CHECK OUTPUT ABOVE")
-    print("="*80)
+        print("FAIL SOME TESTS FAILED - CHECK OUTPUT ABOVE")
+        assert False, "Some tests failed - check output above"
+    print("=" * 80)
 
-    return success
 
 if __name__ == "__main__":
-    success = test_auto_fire_controlled()
-    sys.exit(0 if success else 1)
+    test_auto_fire_controlled()  # Uses assertions now
+    sys.exit(0)

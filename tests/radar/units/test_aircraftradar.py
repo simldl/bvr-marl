@@ -1,17 +1,21 @@
 import pytest
-from radar.units.aircraft import AircraftRadar
-from radar.core.data_link import DataLink
-from radar.lock.aircraft import AircraftLockController
+
+from air_to_air_rl.radar.core.data_link import DataLink
+from air_to_air_rl.radar.lock.aircraft import AircraftLockController
+from air_to_air_rl.radar.units.aircraft import AircraftRadar
+
 
 class DummySim:
     def __init__(self):
         self.active_units = {}
+
 
 class DummyTarget:
     def __init__(self, id_):
         self.id = id_
         self.group = "RED"
         self.position = type("Pos", (), {"lat": 0, "lon": 0, "alt": 0})()
+
 
 class DummyAlly:
     def __init__(self, id_, group, radar_mode="full"):
@@ -28,14 +32,18 @@ class DummyAlly:
             antenna_gain_db=25.0,
             snr_threshold_db=2.0,
             data_link=DataLink(radar_mode),
-            owner=self
+            owner=self,
         )
-        self.position = type("Pos", (), {
-            "lat": 0,
-            "lon": 0,
-            "alt": 0,
-            "copy": lambda self=None: self  # oder besser: Rückgabe einer echten Kopie
-        })()
+        self.position = type(
+            "Pos",
+            (),
+            {
+                "lat": 0,
+                "lon": 0,
+                "alt": 0,
+                "copy": lambda self=None: self,  # oder besser: Rückgabe einer echten Kopie
+            },
+        )()
 
 
 @pytest.fixture
@@ -49,6 +57,7 @@ def dummy_radar_args():
         antenna_gain_db=25.0,
         snr_threshold_db=2.0,
     )
+
 
 def test_update_for_sensors_detects_targets(dummy_radar_args):
     # Radar (self)
@@ -68,6 +77,7 @@ def test_update_for_sensors_detects_targets(dummy_radar_args):
     assert isinstance(tracks, list)
     # (Hier wäre eine realistische Radar-Implementierung nötig, um echte Detections zu prüfen)
 
+
 def test_multi_lock(dummy_radar_args):
     radar = AircraftRadar(**dummy_radar_args, data_link=DataLink("own"))
     # Zwei Tracks mit unterschiedlichen IDs
@@ -82,6 +92,7 @@ def test_multi_lock(dummy_radar_args):
     assert radar.has_radar_lock(t2)
     assert t1.id in radar.get_locked_targets()
     assert t2.id in radar.get_locked_targets()
+
 
 def test_datalink_policy_group_radars(dummy_radar_args):
     # Own AircraftRadar im full-Mode
@@ -103,6 +114,7 @@ def test_datalink_policy_group_radars(dummy_radar_args):
     # Die group_radars werden in update_for_sensors korrekt gefiltert:
     tracks = radar.update_for_sensors(1.0, sim, owner_position=owner.position)
     assert isinstance(tracks, list)
+
 
 def test_lock_unlock(dummy_radar_args):
     radar = AircraftRadar(**dummy_radar_args, data_link=DataLink("own"))

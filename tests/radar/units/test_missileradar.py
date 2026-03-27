@@ -1,7 +1,9 @@
 import pytest
-from radar.units.missile import MissileRadar
-from radar.core.data_link import DataLink
-from radar.lock.missile import MissileLockController
+
+from air_to_air_rl.radar.core.data_link import DataLink
+from air_to_air_rl.radar.lock.missile import MissileLockController
+from air_to_air_rl.radar.units.missile import MissileRadar
+
 
 class DummyTargetProvider:
     def get_guidance_target(self):
@@ -9,12 +11,14 @@ class DummyTargetProvider:
         pos = type("Pos", (), {"lat": 0, "lon": 0.01, "alt": 1000})()
         return pos
 
+
 class DummyOwner:
     def __init__(self):
         self.position = type("Pos", (), {"lat": 0, "lon": 0, "alt": 1000})()
         self.phase_manager = type("Phase", (), {"current_phase": "boost"})()
         self.yaw_deg = 0
         self.pitch_deg = 0
+
 
 @pytest.fixture
 def dummy_radar_args():
@@ -28,14 +32,16 @@ def dummy_radar_args():
         snr_threshold_db=3.0,
     )
 
+
 def test_missileradar_starts_in_other(dummy_radar_args):
     radar = MissileRadar(
         **dummy_radar_args,
         target_provider=DummyTargetProvider(),
         owner=DummyOwner(),
-        initial_datalink_mode="other"
+        initial_datalink_mode="other",
     )
     assert radar.data_link.get_mode() == "other"
+
 
 def test_missileradar_switches_to_own(dummy_radar_args):
     class DummyProvider:
@@ -47,7 +53,7 @@ def test_missileradar_switches_to_own(dummy_radar_args):
         target_provider=DummyProvider(),
         owner=DummyOwner(),
         initial_datalink_mode="other",
-        original_data_link_mode="own"
+        original_data_link_mode="own",
     )
     radar.update(
         tick_secs=1.0,
@@ -67,7 +73,10 @@ def test_missileradar_switches_to_own(dummy_radar_args):
 
 
 def test_missileradar_lock_logic(dummy_radar_args):
-    radar = MissileRadar(**dummy_radar_args, owner=DummyOwner(), target_provider=DummyTargetProvider())
+    radar = MissileRadar(
+        **dummy_radar_args, owner=DummyOwner(), target_provider=DummyTargetProvider()
+    )
+
     class DummyTarget:
         id = "tlock"
 

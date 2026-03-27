@@ -1,0 +1,130 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "air_to_air_rl"
+version = "0.1.0"
+description = "Beyond Visual Range air combat reinforcement learning environment with GUI and training support."
+readme = "README.md"
+authors = [
+    { name = "Simon Schosser", email = "simon.schosser@example.com" }
+]
+license = "MIT"
+keywords = ["reinforcement-learning", "air-combat", "simulation", "bvr", "multi-agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26.0,<2.0",
+    "torch>=2.7.0",
+    "ray[rllib]>=2.50.1",
+    "gymnasium>=1.1.1",
+    "matplotlib>=3.10.1",
+    "pandas>=2.2.3",
+    "pydantic>=2.11.3",
+    "PyYAML>=6.0.2",
+    "hydra-core>=1.3.2",
+    "omegaconf>=2.3.0",
+    "tensorboard>=2.19.0",
+    "scipy>=1.15.2",
+    "Pillow>=11.0.0",
+    "cartopy>=0.24.1",
+    "shapely>=2.1.0",
+    "pyproj>=3.7.1",
+    "geographiclib>=2.0",
+    "pycairo>=1.20.0",
+    "colorful>=0.5.6",
+    "tqdm",
+    "click>=8.1.8",
+    "streamlit>=1.30.0",
+    "ruff>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.5",
+]
+gpu = [
+    "torch[cuda]>=2.7.0",
+    "GPUtil>=1.4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/simldl/air_to_air_rl"
+Repository = "https://github.com/simldl/air_to_air_rl"
+Issues = "https://github.com/simldl/air_to_air_rl/issues"
+
+[project.scripts]
+# Training commands
+air2air-train = "air_to_air_rl.training.train:main"
+air2air-train-simple = "air_to_air_rl.training.train_simple:main"
+
+# Visualization commands
+air2air-view = "air_to_air_rl.visualization.live_view:main"
+air2air-view-behavior-tree = "air_to_air_rl.visualization.live_view_bt:main"
+air2air-view-commands = "air_to_air_rl.visualization.live_view_commands:main"
+
+# Analysis commands
+air2air-export-plots = "air_to_air_rl.analysis.export_plots:main"
+
+# Tacview commands
+air2air-tacview = "air_to_air_rl.tacview.generate:main"
+air2air-tacview-bt = "air_to_air_rl.tacview.generate_bt:main"
+
+# GUI launcher
+air2air-gui = "air_to_air_rl.gui_launcher:main"
+
+# Setup utilities
+air2air-setup-symbols = "setup_symbols:main"
+
+# Code quality
+air2air-lint = "lint_runner:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+pythonpath = ["src"]
+markers = [
+    "slow: marks tests as slow (>0.5 s) — deselect with -m 'not slow'",
+    "integration: marks tests that span multiple subsystems",
+    "unit: marks pure unit tests with no external dependencies",
+    "smoke: end-to-end smoke tests for main program entry points",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line too long — handled separately where needed
+    "F401",  # unused imports in __init__.py re-exports
+    "UP007", # use X | Y for type unions — tolerate Optional[]
+]
+per-file-ignores = { "tests/**" = ["F811"] }
+
+[tool.ruff.lint.isort]
+known-first-party = ["air_to_air_rl"]

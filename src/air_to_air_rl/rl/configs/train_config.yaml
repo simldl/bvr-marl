@@ -1,0 +1,144 @@
+env:
+  num_agents_per_side: 2
+  map_size: 200
+  max_steps: 1024  # 3600 simulation seconds = 1 hour simulation time
+  debug: false
+  
+  # Simulation timing configuration
+  simulation_config:
+    tick_secs: 1.0        # Each step = 1 simulation second
+    max_real_time_s: null # No real-time limit (use only max_steps)
+    early_termination:
+      all_enemies_dead: true      # End early if all enemies destroyed
+      mission_complete: true      # End early if objectives met
+      no_missiles_remaining: false # Continue even without missiles for maneuvering practice
+      
+  # Weapon hit radius configuration
+  weapon_config:
+    missile_hit_radius_m: 500.0   # Missile proximity fuse radius in meters
+    gun_hit_radius_m: 5.0         # Gun projectile hit radius in meters
+    enable_gun: false             # Disable gun system for BVR training (saves compute)
+  
+  # Aircraft Configuration
+  aircraft_config:
+    agent_type: "Eurofighter"        # Options: F22, Eurofighter, F35, Su57, AWACS, DebugPlane
+    opponent_type: "Eurofighter"     # Options: F22, Eurofighter, F35, Su57, AWACS, DebugPlane
+
+  # Missile Configuration
+  missile_config:
+    agent_missiles: ["AIM120_AMRAAM"]      # Options: AIM120_AMRAAM, Meteor, K77M, DefaultMissile
+    opponent_missiles: ["AIM120_AMRAAM"]   # Options: AIM120_AMRAAM, Meteor, K77M, DefaultMissile
+
+  # Weapon Loadouts (override aircraft defaults if needed)
+  loadout_config:
+    # max_missiles: 8        # Override default missile count
+    # flares: 24             # Override default flare count
+    # chaff: 40              # Override default chaff count
+    # ecm: 5                 # Override default ECM count
+    # decoys: 10             # Override default decoy count
+
+  # Datalink Configuration
+  datalink_mode: "full"              # Options: full, own, none, other, msl_support
+
+  # Geometry Configuration (for controlled study scenarios)
+  geometry_config:
+    # Enable controlled geometry spawning (overrides random spawn)
+    # Note: If scenario_config.allowed_regimes is set, that takes precedence
+    use_controlled_geometry: false
+    # Geometry regime - see geometry_sampler.py for options
+    # Options: hot_80km, hot_120km, hot_160km, offset_30deg, offset_45deg,
+    #          high_low_split, low_high_split, bracket_viable, beam_100km, cold_60km
+    regime: "hot_120km"
+    # Formation spread between aircraft in meters
+    formation_spread_m: 2000.0
+    # Add noise for training variety (set to 0 for exact reproducibility)
+    position_noise_m: 0.0
+    altitude_noise_m: 0.0
+    heading_noise_deg: 0.0
+
+  # Scenario Configuration (AWACS and regime randomization)
+  scenario_config:
+    # List of geometry regimes to randomly sample from each episode
+    # If set, overrides geometry_config.use_controlled_geometry
+    # Leave empty [] to use random spawning or single regime from geometry_config
+    allowed_regimes: []
+    # Example for training with variety:
+    # allowed_regimes: ["hot_80km", "hot_120km", "hot_160km", "offset_30deg", "beam_100km"]
+
+    # Whether to randomize regime selection each episode (if multiple regimes specified)
+    randomize_regime: true
+
+    # AWACS configuration
+    awacs_config:
+      # Whether to spawn AWACS for each team
+      agent_awacs: true        # Blue AWACS – west side
+      opponent_awacs: true     # Red  AWACS – east side
+
+      # AWACS orbit altitude and speed
+      orbit_altitude_m: 10000.0
+      orbit_speed_mps: 200.0
+
+      # Orbit pattern: figure-8 with 25 km circle radius.
+      # Each AWACS orbits in a NS figure-8 on its side of the map.
+      # The map EW extent is automatically expanded by 2 × orbit_radius_km
+      # per side (50 km each) so the total map becomes 300 × 200 km.
+      orbit_pattern: "figure8"  # "racetrack", "figure8", "circle", "random", "random_all"
+      orbit_radius_km: 25.0    # Radius of each circle; also sets AWACS side-zone width
+      orbit_leg_length_km: 40.0  # (racetrack only – ignored for figure8)
+      orbit_clockwise: true
+
+      # Lock FOV constraint (degrees)
+      # AWACS can DETECT targets in 360° but can only LOCK targets within this FOV
+      # This simulates needing to face targets for weapons-quality tracking
+      lock_fov_deg: 60.0
+
+      # When true, AWACS cannot be targeted or destroyed by fighters
+      # Agents see AWACS in obs with is_support_asset=1.0 flag
+      awacs_non_engageable: true
+
+  # Metrics collection for study
+  metrics_config:
+    enable_metrics: false            # Enable episode metrics collection
+    output_dir: "study_results"      # Directory for CSV output
+    export_interval: 100             # Export to CSV every N episodes
+
+framework: torch
+num_gpus: 1  # CUDA is now available
+inference_config:
+  framework: torch
+
+training:
+  steps: 512
+  learning_rate: 0.0003
+  batch_size: 256  # Smaller batch for faster iterations
+  n_envs: 1
+  rollout_fragment_length: 128
+  clip_param: 0.2
+  entropy_coef: 0.01
+  vf_loss_coeff: 0.5
+  num_epochs: 3
+  sgd_minibatch_size: 32  # Smaller mini-batch
+  grad_clip: null
+  use_gae: true  # Enable GAE
+  lambda: 0.95  # GAE lambda parameter
+
+model:
+  # Network architecture
+  model_config:
+    action_dim: 10    # Full action space dimension
+    hidden_dim: 256   # Network hidden layer size
+    num_hidden_layers: 3  # Number of hidden layers
+    activation: relu  # Activation function: relu, tanh
+    init_log_std: -0.5  # Initial log std for continuous actions
+    action_mask_key: "action_mask"  # Key for action masking in observations
+
+logging:
+  log_dir: logs
+  save_dir: models
+  model_name: "test"
+  use_tensorboard: true
+
+hydra:
+  job:
+    chdir: false
+training_mode: bvr

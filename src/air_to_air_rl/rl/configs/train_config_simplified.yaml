@@ -1,0 +1,96 @@
+# Simplified environment training config.
+#
+# Uses SimplifiedMultiAgentEnv:
+#   - Observations: truth positions/speeds + missile warner (no radar pipeline)
+#   - Actions:      [energy, lift_phi, lift_N, missile_trigger]  (4-dim)
+#   - No AWACS, no gun, no countermeasures, automatic target selection
+#
+# Good for fast initial training before switching to the full BVR environment.
+
+env:
+  # ---- Team setup ----
+  num_agents_per_team: 2
+  map_size_km: 300
+  max_steps: 1200
+  tick_secs: 1.0
+  debug: false
+
+  # ---- Aircraft types (class name strings) ----
+  agent_aircraft_type: "Eurofighter"
+  opponent_aircraft_type: "Eurofighter"
+
+  # ---- Observation slots ----
+  num_ff: 1         # friendly fighter slots (excluding self; n-1 teammates)
+  num_ef: 2         # enemy fighter slots
+  num_warn: 4       # missile warning sectors
+
+  # ---- Missile ----
+  missile_cooldown_s: 3.0
+
+  # ---- Termination ----
+  early_term_all_enemies_dead: true
+  early_term_mission_complete: true
+  early_term_no_missiles: false
+
+  # ---- Spawning ----
+  use_controlled_geometry: false
+  regime: "hot_200km"
+
+  # ---- Logging ----
+  tacview_logfile: null   # set to a path like "logs/episode.acmi" to enable
+
+framework: torch
+num_gpus: 1
+
+# ---- PPO / RLlib training settings ----
+training:
+  steps: 30000
+  learning_rate: 0.0003
+  batch_size: 512
+  n_envs: 1
+  rollout_fragment_length: 200
+  clip_param: 0.2
+  entropy_coef: 0.01
+  vf_loss_coeff: 0.5
+  num_epochs: 5
+  sgd_minibatch_size: 64
+  grad_clip: 1.0
+  use_gae: true
+  lambda: 0.95
+
+  # Reward shaping (passed through to RewardCalculator)
+  reward_config:
+    enable_terminal: true
+    enable_tactical: false
+    enable_control: false
+    enable_defensive: false
+    enable_energy: false
+
+# ---- Network ----
+model:
+  model_config:
+    action_dim: 4
+    full_action_dim: 4         # Prevents expansion to 10-dim by ActionWrapper
+    wrapped_action_dim: 4
+    hidden_dim: 128
+    num_hidden_layers: 2
+    activation: relu
+    init_log_std: -0.5
+    action_mask_key: "action_mask"
+
+    # Simplified env has a 47-dim flat observation (not BVR structured format).
+
+    max_seq_len: 64
+
+# ---- Logging ----
+logging:
+  log_dir: logs
+  save_dir: models
+  model_name: "simplified_v1"
+  use_tensorboard: true
+
+hydra:
+  job:
+    chdir: false
+
+training_mode: simplified
