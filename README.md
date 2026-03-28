@@ -231,11 +231,13 @@ Please note: This public release excludes proprietary components. Contributions 
 If you use this environment in your research, please cite:
 
 ```bibtex
-@article{schosser2024bvrmarl,
-  title={Multi-Agent Reinforcement Learning Environment for Beyond Visual Range Air Combat (BVR-MARL)},
-  author={Schosser, Simon and [Additional Authors]},
-  journal={[Journal Name]},
-  year={2024}
+@inproceedings{inproceedings,
+author = {Schosser, Simon and Retzlaff, Carl and Schulte, Axel},
+year = {2026},
+month = {01},
+pages = {},
+title = {Multi-Agent Reinforcement Learning Environment for Beyond Visual Range Air Combat (BVR-MARL)},
+doi = {10.2514/6.2026-1592}
 }
 ```
 
