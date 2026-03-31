@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "BVR-MARL: A high-fidelity Beyond Visual Range air combat simulation environment for multi-agent reinforcement learning research"
 readme = "README.md"
 authors = [
-    { name = "Simon Schosser", email = "simon.schosser@example.com" }
+    { name = "Simon Schosser", email = "simon.schosser@unibw.com" }
 ]
 license = "MIT"
 keywords = ["reinforcement-learning", "air-combat", "simulation", "bvr", "multi-agent"]
