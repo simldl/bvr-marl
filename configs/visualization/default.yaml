@@ -1,0 +1,31 @@
+# Default Visualization Configuration
+# This is the default config for general purpose visualization
+
+# Path to the trained model checkpoint
+# Set to null to use random actions instead
+checkpoint_path: null
+
+# Path to model config override file (optional)
+model_config_path: null
+
+# Path to training config file (optional, defaults to the public baseline config)
+# IMPORTANT: This must match the config used to train the checkpoint!
+train_config_path: configs/training/basic.yaml
+
+# Environment type: "bvr" (full radar/AWACS/gun) or "simplified" (truth obs, 4-dim actions)
+env_type: bvr
+
+# Scenario overlay shown in the 2D view. "default" disables extra annotations.
+scenario: default
+
+# Visualization settings
+visualization:
+  frames: 100        # Number of frames to simulate
+  interval: 100      # Interval between frames in milliseconds
+  real_time_speed: false  # If true, syncs interval to simulation tick rate for real-time playback
+  save_video: false  # Whether to save the visualization as a video
+  save_rewards: true # Whether to save detailed reward logs (CSV + JSON)
+  symbol_mode: flying_objects   # Symbol rendering: "nato" (MIL-STD-2525C frames), "flying_objects" (type-specific silhouettes), "procedural" (Cairo shapes)
+  dpi: 200            # Render resolution: 200=default, 300=high, 400=ultra
+  symbol_scale: 2.0   # Sprite magnification: 1.0=original, 2.0=double (default), 3.0=triple
+  show_text: true      # Show aircraft labels, status overlays, and scale-bar labels

@@ -1,0 +1,107 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bvr-marl-core"
+version = "0.1.0"
+description = "BVR-MARL Core: BVR air combat simulation engine with RL environments, physics, and training infrastructure"
+readme = "README.md"
+authors = [
+    { name = "Simon Schosser", email = "simon.schosser@unibw.com" }
+]
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=1.26.0,<2.0",
+    "scipy>=1.15.2",
+    "PyYAML>=6.0.2",
+    "pyproj>=3.7.1",
+    "pydantic>=2.11.3",
+    "torch>=2.7.0",
+    "ray[rllib,tune]>=2.50.1",
+    "dm-tree>=0.1.9",
+    "gymnasium>=1.1.1",
+    "matplotlib>=3.10.1",
+    "pandas>=2.2.3",
+    "hydra-core>=1.3.2",
+    "omegaconf>=2.3.0",
+    "tensorboard>=2.19.0",
+    "Pillow>=11.0.0",
+    "cartopy>=0.24.1",
+    "shapely>=2.1.0",
+    "geographiclib>=2.0",
+    "pycairo>=1.20.0",
+    "colorful>=0.5.6",
+    "tqdm",
+    "click>=8.1.8",
+    "streamlit>=1.30.0",
+    "rpds-py>=0.18.0",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch[cuda]>=2.7.0",
+    "GPUtil>=1.4.0",
+]
+dev = [
+    "pytest>=8.3.5",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+bvr-train         = "bvr_marl_core.training.train:main"
+bvr-train-simple  = "bvr_marl_core.training.train_simple:main"
+bvr-train-public  = "bvr_marl_core.public.train:main"
+bvr-view          = "bvr_marl_core.visualization.live_view:main"
+bvr-view-commands = "bvr_marl_core.visualization.live_view_commands:main"
+bvr-view-public   = "bvr_marl_core.public.visualize:main"
+bvr-export-plots  = "bvr_marl_core.analysis.export_plots:main"
+bvr-tacview       = "bvr_marl_core.tacview.generate:main"
+bvr-gui           = "bvr_marl_core.gui_launcher:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.package-data]
+"bvr_marl_core" = [
+    "gui/*.yaml",
+    "configs/shared/*.yaml",
+    "configs/training/*.yaml",
+    "configs/training/**/*.yaml",
+    "configs/visualization/*.yaml",
+    "configs/gui/*.yaml",
+    "configs/tacview/*.yaml",
+    "visualization/config/*.yaml",
+    "visualization/configs/*.yaml",
+    "tacview/*.yaml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+pythonpath = ["src"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "smoke: marks tests as smoke tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501", "F401", "UP007"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bvr_marl_core"]

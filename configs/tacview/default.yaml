@@ -1,0 +1,25 @@
+# Tacview scenario generation config.
+# Most environment settings are inherited from train_config_path.
+
+model:
+  # Path to trained model checkpoint (null = use random actions)
+  checkpoint_path: null
+
+  # Path to model configuration override (optional)
+  model_config_path: null
+
+  # Path to training config that matches the checkpoint.
+  # IMPORTANT: must match the config used during training — all environment
+  # settings (map_size, agents, weapons, observation space) are loaded from here.
+  train_config_path: null
+
+simulation:
+  # Number of simulation steps per episode
+  frames: 1000
+
+  # Output ACMI file path (null = auto-generate timestamped filename)
+  acmi_output_path: null
+
+output:
+  # Print step progress every N steps
+  progress_interval: 50

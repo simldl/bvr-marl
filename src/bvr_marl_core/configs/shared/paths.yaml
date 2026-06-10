@@ -1,0 +1,22 @@
+# Shared path defaults — canonical output directory layout.
+# Read by the GUI and services to resolve default save locations.
+# Override individual keys via environment variables or CLI flags.
+
+# Training output root (relative to project root, or absolute)
+models_dir: models
+
+# TensorBoard / training log root
+logs_dir: models
+
+# Runtime state root (GUI process state, background logs)
+# Override with AIR2AIR_RUNTIME_DIR environment variable
+runtime_dir: runtime
+
+# Tacview ACMI output directory (used when --acmi is not specified)
+tacview_output_dir: runtime/tacview
+
+# Video export output directory (used when --save-video is not specified)
+video_output_dir: runtime/videos
+
+# Profiling results
+profiling_dir: profiling_results

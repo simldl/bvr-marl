@@ -1,0 +1,18 @@
+# Visualization Configuration - OCA v DCA scenario
+# Shows the line of engagement overlay through the map centre.
+
+checkpoint_path: null
+model_config_path: null
+train_config_path: configs/training/basic.yaml
+env_type: bvr
+scenario: oca_v_dca_scenario
+
+visualization:
+  frames: 200
+  interval: 80
+  real_time_speed: false
+  save_video: false
+  save_rewards: false
+  symbol_mode: flying_objects
+  dpi: 200
+  symbol_scale: 2.0
