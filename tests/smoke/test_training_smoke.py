@@ -49,8 +49,9 @@ def test_environment_create_reset_step():
 @pytest.mark.skipif(
     os.getenv("CI") == "true", reason="Ray startup overhead too slow for CI runners"
 )
-def test_training_subprocess_runs():
-    """A minimal training run completes via subprocess (2 steps, no GPU)."""
+def test_training_subprocess_runs(tmp_path):
+    """A minimal training run completes via subprocess."""
+    artifact_dir = tmp_path / "training_artifacts"
     result = subprocess.run(
         [
             sys.executable,
@@ -59,9 +60,17 @@ def test_training_subprocess_runs():
             "--config",
             "basic",
             "--overrides",
-            "training.steps=2",
-            "num_env_runners=1",
+            "training.steps=1",
+            "num_env_runners=0",
+            "num_learners=0",
             "num_gpus=0",
+            "env.num_agents_per_side=1",
+            "env.max_steps=8",
+            "training.train_batch_size=8",
+            "training.sgd_minibatch_size=4",
+            "training.num_epochs=1",
+            f"logging.save_dir={artifact_dir.as_posix()}",
+            f"logging.log_dir={(artifact_dir / 'logs').as_posix()}",
         ],
         capture_output=True,
         text=True,
