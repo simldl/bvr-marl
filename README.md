@@ -1,6 +1,6 @@
 # BVR-MARL: Public Baseline Platform for BVR Air-Combat Reinforcement Learning
 
-[![CI](https://github.com/simldl/bvr-marl-core/actions/workflows/ci.yml/badge.svg)](https://github.com/simldl/bvr-marl-core/actions/workflows/ci.yml)
+[![CI](https://github.com/simldl/bvr-marl/actions/workflows/ci.yml/badge.svg)](https://github.com/simldl/bvr-marl-core/actions/workflows/ci.yml)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
