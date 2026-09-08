@@ -5,7 +5,7 @@ Handles resolution of missile types and other configurable parameters
 from YAML configuration to actual class instances.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 from bvr_marl_core.rl.utils.type_maps import MISSILE_TYPE_MAP
 

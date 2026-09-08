@@ -3,8 +3,6 @@ Drag calculation with load factor.
 Computes total drag including induced drag from maneuvers.
 """
 
-import numpy as np
-
 
 class DragCalculator:
     """Calculate drag forces including load factor effects."""

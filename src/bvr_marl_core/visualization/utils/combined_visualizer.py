@@ -120,7 +120,7 @@ class CombinedVisualizer:
                 reg = SymbolRegistry(mode=symbol_mode)
                 if reg.available_symbols():
                     symbol_registry = reg
-            except Exception:
+            except (ImportError, AttributeError, TypeError):
                 pass
 
         # Initialize plotter with dark tactical palette
@@ -421,7 +421,14 @@ class CombinedVisualizer:
                     attention_data = self._attention_extractor.extract(observations)
                     if attention_data:
                         self.update_attention(attention_data, timestep[0])
-                except Exception:
+                except (
+                    AttributeError,
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                    IndexError,
+                    ZeroDivisionError,
+                ):
                     pass
 
             return []

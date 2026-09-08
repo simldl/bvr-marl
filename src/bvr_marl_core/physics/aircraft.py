@@ -5,9 +5,7 @@ from dataclasses import dataclass, field
 
 from bvr_marl_core.physics.afterburner import Afterburner, AfterburnerParams
 from bvr_marl_core.physics.flying_objects import FlyingPhysics
-from bvr_marl_core.physics.physics import AIRSPEED_OF_SOUND, PhysicsParams, get_speed_of_sound
-from bvr_marl_core.simulator.core.helpers import Position
-from bvr_marl_core.simulator.utils.geodesics import geodetic_direct
+from bvr_marl_core.physics.physics import PhysicsParams, get_speed_of_sound
 
 
 class AircraftPhysics(FlyingPhysics):

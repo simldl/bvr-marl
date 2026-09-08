@@ -24,21 +24,24 @@ Supported arguments for behavior-tree mode:
 
 import os
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 
-from bvr_marl_core.services.processes import ProcessMonitor, ProcessRecord
-from bvr_marl_core.services.tacview import build_tacview_cmd
-from bvr_marl_core.services.training import launch_background_process
-
-from .checkpoint_picker import (
+from bvr_marl_core.gui.components.checkpoint_picker import (
     checkpoint_picker,
     find_campaign_checkpoints,
     find_train_config_for_checkpoint,
 )
-from .output_paths import display_compact_output_paths, display_recent_outputs
+from bvr_marl_core.gui.components.output_paths import (
+    display_compact_output_paths,
+    display_recent_outputs,
+)
+from bvr_marl_core.services.processes import ProcessMonitor, ProcessRecord
+from bvr_marl_core.services.tacview import build_tacview_cmd
+from bvr_marl_core.services.training import launch_background_process
 
 
 class TacviewProcessMonitor(ProcessMonitor):
@@ -46,6 +49,25 @@ class TacviewProcessMonitor(ProcessMonitor):
 
     def __init__(self) -> None:
         super().__init__("tacview_processes.json")
+
+
+@dataclass(slots=True)
+class _RlScenarioInputs:
+    selected_ckpt: str | None
+    train_cfg: str | None
+    num_scenarios: int
+    frames: int
+    seed_start: int
+    acmi_path: str
+
+
+@dataclass(slots=True)
+class _BtScenarioInputs:
+    aircraft: str
+    num_scenarios: int
+    frames: int
+    seed_start: int
+    acmi_path: str
 
 
 def _render_tacview_card(tp: ProcessRecord, monitor: TacviewProcessMonitor, is_dead: bool):
@@ -185,197 +207,264 @@ def tacview_generator():
 
     tab1, tab2 = st.tabs(["RL Model", "Behavior Tree"])
 
-    # Tab 1 — RL controller
     with tab1:
-        st.subheader("RL Model Scenarios")
+        _render_rl_scenario_tab(monitor)
 
-        col1, col2 = st.columns([2, 1])
-
-        with col1:
-            st.markdown("#### Model")
-            selected_ckpt = checkpoint_picker(
-                key_prefix="tacview_rl",
-                allow_none=True,
-                none_label="Random Actions (no checkpoint)",
-                label="RL Checkpoint",
-            )
-            with st.expander("Custom checkpoint path"):
-                custom_ckpt = st.text_input(
-                    "Paste a full checkpoint path:",
-                    placeholder="models/my_model/PPO_.../checkpoint_000010",
-                    key="rl_custom_ckpt",
-                )
-                if custom_ckpt:
-                    selected_ckpt = custom_ckpt
-
-            campaign_ckpts = find_campaign_checkpoints()
-            if campaign_ckpts:
-                with st.expander("Campaign-trained Models", expanded=True):
-                    campaign_labels = [label for _, label, _ in campaign_ckpts]
-                    campaign_selection = st.selectbox(
-                        "Campaign model:",
-                        options=["No campaign model"] + campaign_labels,
-                        key="tacview_campaign_ckpt",
-                        help=(
-                            "Automatically discovered checkpoints from campaign training runs. "
-                            "Selecting one overrides the model picker above."
-                        ),
-                    )
-                    if campaign_selection != "No campaign model":
-                        selected_ckpt = next(
-                            ckpt for _, label, ckpt in campaign_ckpts if label == campaign_selection
-                        )
-                        st.caption(f"`{selected_ckpt}`")
-
-            # Auto-detect training config from the selected checkpoint
-            _auto_train_cfg = (
-                find_train_config_for_checkpoint(selected_ckpt) if selected_ckpt else None
-            )
-            if _auto_train_cfg:
-                st.success(f"Auto-detected training config: `{_auto_train_cfg}`")
-
-            train_configs = find_train_configs()
-            if train_configs:
-                _tv_cfg_options = ["Default"] + train_configs
-                _tv_cfg_default = 0
-                if _auto_train_cfg and _auto_train_cfg not in _tv_cfg_options:
-                    _tv_cfg_options = [_auto_train_cfg] + _tv_cfg_options
-                if _auto_train_cfg and _auto_train_cfg in _tv_cfg_options:
-                    _tv_cfg_default = _tv_cfg_options.index(_auto_train_cfg)
-                train_cfg = st.selectbox(
-                    "Training config (for env setup):",
-                    options=_tv_cfg_options,
-                    index=_tv_cfg_default,
-                    key="rl_train_cfg",
-                )
-            else:
-                train_cfg = st.text_input(
-                    "Training config path:",
-                    value=_auto_train_cfg or "",
-                    key="rl_train_cfg_text",
-                )
-
-            st.markdown("#### Scenario Parameters")
-            col1a, col1b = st.columns(2)
-            with col1a:
-                rl_num = st.number_input(
-                    "Number of scenarios:", min_value=1, max_value=50, value=1, key="rl_num"
-                )
-                rl_frames = st.number_input(
-                    "Frames per scenario:", min_value=50, max_value=5000, value=500, key="rl_frames"
-                )
-            with col1b:
-                rl_seed_start = st.number_input("Seed start:", min_value=0, value=0, key="rl_seed")
-                rl_acmi = st.text_input(
-                    "ACMI output path (optional):",
-                    placeholder="Auto-generated if empty",
-                    key="rl_acmi",
-                )
-
-        with col2:
-            st.markdown("#### Launch")
-
-            if st.button("Generate RL Scenario", type="primary", width="stretch", key="btn_rl"):
-                ckpt = selected_ckpt  # None when "Random Actions" is chosen
-                cfg = None if train_cfg in ("Default", "") else train_cfg
-                cmd = build_tacview_cmd(
-                    controller="rl",
-                    checkpoint=ckpt,
-                    train_config=cfg,
-                    frames=rl_frames,
-                    num_scenarios=rl_num,
-                    seed_start=rl_seed_start,
-                    acmi_path=rl_acmi or None,
-                )
-                _launch(f"RL_{rl_num}sc", cmd, monitor)
-
-            st.markdown("---")
-            st.markdown("#### Quick Launch")
-
-            if st.button("Quick Demo (random actions)", width="stretch", key="btn_rl_demo"):
-                _launch(
-                    "RL_demo",
-                    build_tacview_cmd(controller="rl", frames=500, num_scenarios=1),
-                    monitor,
-                )
-
-            if selected_ckpt and st.button(
-                "Selected Checkpoint (1 scenario)", width="stretch", key="btn_rl_latest"
-            ):
-                _launch(
-                    "RL_latest",
-                    build_tacview_cmd(
-                        controller="rl",
-                        checkpoint=selected_ckpt,
-                        frames=500,
-                        num_scenarios=1,
-                    ),
-                    monitor,
-                )
-
-    # Tab 2 — Behavior-tree controller
     with tab2:
-        st.subheader("Behavior Tree Scenarios")
+        _render_bt_scenario_tab(monitor)
 
-        col1, col2 = st.columns([2, 1])
+    _render_tacview_output_info()
 
-        with col1:
-            st.markdown("#### Aircraft & Parameters")
 
-            bt_aircraft = st.selectbox(
-                "Aircraft type:", ["F22", "Eurofighter", "F35"], key="bt_aircraft"
-            )
+def _render_rl_scenario_tab(monitor: TacviewProcessMonitor) -> None:
+    st.subheader("RL Model Scenarios")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        inputs = _render_rl_scenario_inputs()
+    with col2:
+        _render_rl_launch_controls(monitor, inputs)
 
-            col1a, col1b = st.columns(2)
-            with col1a:
-                bt_num = st.number_input(
-                    "Number of scenarios:", min_value=1, max_value=50, value=3, key="bt_num"
-                )
-                bt_frames = st.number_input(
-                    "Frames per scenario:", min_value=50, max_value=5000, value=500, key="bt_frames"
-                )
-            with col1b:
-                bt_seed_start = st.number_input("Seed start:", min_value=0, value=0, key="bt_seed")
-                bt_acmi = st.text_input(
-                    "ACMI output path (optional):",
-                    placeholder="Auto-generated if empty",
-                    key="bt_acmi",
-                )
 
-        with col2:
-            st.markdown("#### Launch")
+def _render_rl_scenario_inputs() -> _RlScenarioInputs:
+    st.markdown("#### Model")
+    selected_ckpt = _select_rl_checkpoint()
+    train_cfg = _select_rl_training_config(selected_ckpt)
 
-            if st.button("Generate BT Scenario", type="primary", width="stretch", key="btn_bt"):
-                cmd = build_tacview_cmd(
-                    controller="behavior-tree",
-                    aircraft=bt_aircraft,
-                    frames=bt_frames,
-                    num_scenarios=bt_num,
-                    seed_start=bt_seed_start,
-                    acmi_path=bt_acmi or None,
-                )
-                _launch(f"BT_{bt_aircraft}_{bt_num}sc", cmd, monitor)
+    st.markdown("#### Scenario Parameters")
+    col1, col2 = st.columns(2)
+    with col1:
+        rl_num = st.number_input(
+            "Number of scenarios:",
+            min_value=1,
+            max_value=50,
+            value=1,
+            key="rl_num",
+        )
+        rl_frames = st.number_input(
+            "Frames per scenario:",
+            min_value=50,
+            max_value=5000,
+            value=500,
+            key="rl_frames",
+        )
+    with col2:
+        rl_seed_start = st.number_input("Seed start:", min_value=0, value=0, key="rl_seed")
+        rl_acmi = st.text_input(
+            "ACMI output path (optional):",
+            placeholder="Auto-generated if empty",
+            key="rl_acmi",
+        )
 
-            st.markdown("---")
-            st.markdown("#### Quick Launch")
+    return _RlScenarioInputs(
+        selected_ckpt=selected_ckpt,
+        train_cfg=train_cfg,
+        num_scenarios=rl_num,
+        frames=rl_frames,
+        seed_start=rl_seed_start,
+        acmi_path=rl_acmi,
+    )
 
-            if st.button("Random BT Scenarios (3x)", width="stretch", key="btn_bt_random"):
-                _launch(
-                    "BT_random_3",
-                    build_tacview_cmd(
-                        controller="behavior-tree", frames=500, num_scenarios=3, seed_start=0
-                    ),
-                    monitor,
-                )
 
-            if st.button("Single BT Scenario", width="stretch", key="btn_bt_single"):
-                _launch(
-                    "BT_single",
-                    build_tacview_cmd(controller="behavior-tree", frames=500, num_scenarios=1),
-                    monitor,
-                )
+def _select_rl_checkpoint() -> str | None:
+    selected_ckpt = checkpoint_picker(
+        key_prefix="tacview_rl",
+        allow_none=True,
+        none_label="Random Actions (no checkpoint)",
+        label="RL Checkpoint",
+    )
+    with st.expander("Custom checkpoint path"):
+        custom_ckpt = st.text_input(
+            "Paste a full checkpoint path:",
+            placeholder="models/my_model/PPO_.../checkpoint_000010",
+            key="rl_custom_ckpt",
+        )
+        if custom_ckpt:
+            selected_ckpt = custom_ckpt
+    return _select_campaign_checkpoint(selected_ckpt)
 
-    # Output info
+
+def _select_campaign_checkpoint(selected_ckpt: str | None) -> str | None:
+    campaign_ckpts = find_campaign_checkpoints()
+    if not campaign_ckpts:
+        return selected_ckpt
+
+    with st.expander("Campaign-trained Models", expanded=True):
+        campaign_labels = [label for _, label, _ in campaign_ckpts]
+        campaign_selection = st.selectbox(
+            "Campaign model:",
+            options=["No campaign model"] + campaign_labels,
+            key="tacview_campaign_ckpt",
+            help=(
+                "Automatically discovered checkpoints from campaign training runs. "
+                "Selecting one overrides the model picker above."
+            ),
+        )
+        if campaign_selection == "No campaign model":
+            return selected_ckpt
+
+        selected_ckpt = next(
+            ckpt for _, label, ckpt in campaign_ckpts if label == campaign_selection
+        )
+        st.caption(f"`{selected_ckpt}`")
+        return selected_ckpt
+
+
+def _select_rl_training_config(selected_ckpt: str | None) -> str | None:
+    auto_train_cfg = find_train_config_for_checkpoint(selected_ckpt) if selected_ckpt else None
+    if auto_train_cfg:
+        st.success(f"Auto-detected training config: `{auto_train_cfg}`")
+
+    train_configs = find_train_configs()
+    if not train_configs:
+        return st.text_input(
+            "Training config path:",
+            value=auto_train_cfg or "",
+            key="rl_train_cfg_text",
+        )
+
+    options = ["Default"] + train_configs
+    default_index = 0
+    if auto_train_cfg and auto_train_cfg not in options:
+        options = [auto_train_cfg] + options
+    if auto_train_cfg and auto_train_cfg in options:
+        default_index = options.index(auto_train_cfg)
+    return st.selectbox(
+        "Training config (for env setup):",
+        options=options,
+        index=default_index,
+        key="rl_train_cfg",
+    )
+
+
+def _render_rl_launch_controls(
+    monitor: TacviewProcessMonitor,
+    inputs: _RlScenarioInputs,
+) -> None:
+    st.markdown("#### Launch")
+    if st.button("Generate RL Scenario", type="primary", width="stretch", key="btn_rl"):
+        cfg = None if inputs.train_cfg in ("Default", "") else inputs.train_cfg
+        cmd = build_tacview_cmd(
+            controller="rl",
+            checkpoint=inputs.selected_ckpt,
+            train_config=cfg,
+            frames=inputs.frames,
+            num_scenarios=inputs.num_scenarios,
+            seed_start=inputs.seed_start,
+            acmi_path=inputs.acmi_path or None,
+        )
+        _launch(f"RL_{inputs.num_scenarios}sc", cmd, monitor)
+
+    st.markdown("---")
+    st.markdown("#### Quick Launch")
+    if st.button("Quick Demo (random actions)", width="stretch", key="btn_rl_demo"):
+        _launch(
+            "RL_demo",
+            build_tacview_cmd(controller="rl", frames=500, num_scenarios=1),
+            monitor,
+        )
+
+    if inputs.selected_ckpt and st.button(
+        "Selected Checkpoint (1 scenario)",
+        width="stretch",
+        key="btn_rl_latest",
+    ):
+        _launch(
+            "RL_latest",
+            build_tacview_cmd(
+                controller="rl",
+                checkpoint=inputs.selected_ckpt,
+                frames=500,
+                num_scenarios=1,
+            ),
+            monitor,
+        )
+
+
+def _render_bt_scenario_tab(monitor: TacviewProcessMonitor) -> None:
+    st.subheader("Behavior Tree Scenarios")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        inputs = _render_bt_scenario_inputs()
+    with col2:
+        _render_bt_launch_controls(monitor, inputs)
+
+
+def _render_bt_scenario_inputs() -> _BtScenarioInputs:
+    st.markdown("#### Aircraft & Parameters")
+    aircraft = st.selectbox("Aircraft type:", ["F22", "Eurofighter", "F35"], key="bt_aircraft")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        bt_num = st.number_input(
+            "Number of scenarios:",
+            min_value=1,
+            max_value=50,
+            value=3,
+            key="bt_num",
+        )
+        bt_frames = st.number_input(
+            "Frames per scenario:",
+            min_value=50,
+            max_value=5000,
+            value=500,
+            key="bt_frames",
+        )
+    with col2:
+        bt_seed_start = st.number_input("Seed start:", min_value=0, value=0, key="bt_seed")
+        bt_acmi = st.text_input(
+            "ACMI output path (optional):",
+            placeholder="Auto-generated if empty",
+            key="bt_acmi",
+        )
+
+    return _BtScenarioInputs(
+        aircraft=aircraft,
+        num_scenarios=bt_num,
+        frames=bt_frames,
+        seed_start=bt_seed_start,
+        acmi_path=bt_acmi,
+    )
+
+
+def _render_bt_launch_controls(
+    monitor: TacviewProcessMonitor,
+    inputs: _BtScenarioInputs,
+) -> None:
+    st.markdown("#### Launch")
+    if st.button("Generate BT Scenario", type="primary", width="stretch", key="btn_bt"):
+        cmd = build_tacview_cmd(
+            controller="behavior-tree",
+            aircraft=inputs.aircraft,
+            frames=inputs.frames,
+            num_scenarios=inputs.num_scenarios,
+            seed_start=inputs.seed_start,
+            acmi_path=inputs.acmi_path or None,
+        )
+        _launch(f"BT_{inputs.aircraft}_{inputs.num_scenarios}sc", cmd, monitor)
+
+    st.markdown("---")
+    st.markdown("#### Quick Launch")
+    if st.button("Random BT Scenarios (3x)", width="stretch", key="btn_bt_random"):
+        _launch(
+            "BT_random_3",
+            build_tacview_cmd(
+                controller="behavior-tree",
+                frames=500,
+                num_scenarios=3,
+                seed_start=0,
+            ),
+            monitor,
+        )
+
+    if st.button("Single BT Scenario", width="stretch", key="btn_bt_single"):
+        _launch(
+            "BT_single",
+            build_tacview_cmd(controller="behavior-tree", frames=500, num_scenarios=1),
+            monitor,
+        )
+
+
+def _render_tacview_output_info() -> None:
     st.markdown("---")
     st.subheader("Tacview Output Information")
 

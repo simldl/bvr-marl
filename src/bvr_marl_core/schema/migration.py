@@ -18,7 +18,7 @@ _migrate_2_to_3.
 
 from __future__ import annotations
 
-from .version import SCHEMA_VERSION, SUPPORTED_VERSIONS
+from bvr_marl_core.schema.version import SCHEMA_VERSION, SUPPORTED_VERSIONS
 
 # ---------------------------------------------------------------------------
 # Step implementations — add one function per version hop

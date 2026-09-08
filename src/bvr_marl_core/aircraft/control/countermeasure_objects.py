@@ -3,8 +3,6 @@ Simple countermeasure objects that persist in the simulation for hit calculation
 Flares, chaff, and decoys stay in the simulation for multiple seconds.
 """
 
-import numpy as np
-
 from bvr_marl_core.simulator.core.units import Unit
 
 

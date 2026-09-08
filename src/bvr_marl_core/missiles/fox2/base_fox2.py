@@ -1,5 +1,3 @@
-import numpy as np
-
 from bvr_marl_core.missiles.missile import Missile
 
 

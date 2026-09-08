@@ -1,5 +1,4 @@
 from bvr_marl_core.missiles.guidance.direct import DirectPursuitGuidance
-from bvr_marl_core.missiles.guidance.lead import LeadInterceptGuidance
 from bvr_marl_core.missiles.guidance.pn_propnav import PnPropNavGuidance
 
 

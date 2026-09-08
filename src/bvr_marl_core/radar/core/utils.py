@@ -4,89 +4,58 @@ import numpy as np
 
 from bvr_marl_core.simulator.core.helpers import Position
 from bvr_marl_core.simulator.core.units import Unit
-from bvr_marl_core.simulator.utils.angles import signed_yaw_deg_diff, yaw_geo_to_math
-from bvr_marl_core.simulator.utils.geodesics import geodetic_bearing_deg
+from bvr_marl_core.simulator.utils.angles import signed_yaw_deg_diff
+from bvr_marl_core.simulator.utils.geodesics import (
+    geodetic_bearing_deg,
+    geodetic_to_enu,
+)
+from bvr_marl_core.simulator.utils.geodesics import (
+    geodetic_to_ecef_scalar as _geodetic_to_ecef_scalar,
+)
 
 rad_earth = 6378137.0
 
-
-def geodetic_to_enu(
-    lat: float, lon: float, alt: float, ref_lat: float, ref_lon: float, ref_alt: float
-) -> np.ndarray:
-
-    # WGS84
-    a = rad_earth
-    f = 1 / 298.257223563
-    b = a * (1 - f)
-    e_sq = f * (2 - f)
-
-    def geodetic_to_ecef(lat, lon, alt):
-        lat_rad = np.radians(lat)
-        lon_rad = np.radians(lon)
-        N = a / np.sqrt(1 - e_sq * np.sin(lat_rad) ** 2)
-        x = (N + alt) * np.cos(lat_rad) * np.cos(lon_rad)
-        y = (N + alt) * np.cos(lat_rad) * np.sin(lon_rad)
-        z = ((b**2 / a**2) * N + alt) * np.sin(lat_rad)
-        return np.array([x, y, z])
-
-    xyz = geodetic_to_ecef(lat, lon, alt)
-    xyz_ref = geodetic_to_ecef(ref_lat, ref_lon, ref_alt)
-
-    dx = xyz - xyz_ref
-
-    lat0 = np.radians(ref_lat)
-    lon0 = np.radians(ref_lon)
-    R = np.array(
-        [
-            [-np.sin(lon0), np.cos(lon0), 0],
-            [-np.sin(lat0) * np.cos(lon0), -np.sin(lat0) * np.sin(lon0), np.cos(lat0)],
-            [np.cos(lat0) * np.cos(lon0), np.cos(lat0) * np.sin(lon0), np.sin(lat0)],
-        ]
-    )
-
-    enu = R @ dx
-    return enu
+# WGS84 constants (precomputed once; identical values to the previous inline definitions).
+# geodetic_to_enu / _geodetic_to_ecef_scalar now live in simulator.utils.geodesics and are
+# re-exported above so radar callers (and the public simulator API) share one implementation.
+_WGS84_A = rad_earth
+_WGS84_F = 1 / 298.257223563
+_WGS84_B = _WGS84_A * (1 - _WGS84_F)
+_WGS84_E_SQ = _WGS84_F * (2 - _WGS84_F)
+_WGS84_B2_OVER_A2 = (_WGS84_B * _WGS84_B) / (_WGS84_A * _WGS84_A)  # == 1 - e_sq
+_WGS84_EP_SQ = (_WGS84_A * _WGS84_A - _WGS84_B * _WGS84_B) / (_WGS84_B * _WGS84_B)
 
 
 def enu_to_geodetic(enu_vec, ref_lat, ref_lon, ref_alt):
-    # WGS84
-    a = 6378137.0
-    f = 1 / 298.257223563
-    e_sq = f * (2 - f)
+    xr, yr, zr = _geodetic_to_ecef_scalar(ref_lat, ref_lon, ref_alt)
 
-    def geodetic_to_ecef(lat, lon, alt):
-        lat_r = np.radians(lat)
-        lon_r = np.radians(lon)
-        N = a / np.sqrt(1 - e_sq * np.sin(lat_r) ** 2)
-        x = (N + alt) * np.cos(lat_r) * np.cos(lon_r)
-        y = (N + alt) * np.cos(lat_r) * np.sin(lon_r)
-        z = (N * (1 - e_sq) + alt) * np.sin(lat_r)
-        return np.array([x, y, z])
+    lat0 = math.radians(ref_lat)
+    lon0 = math.radians(ref_lon)
+    sin_lat0 = math.sin(lat0)
+    cos_lat0 = math.cos(lat0)
+    sin_lon0 = math.sin(lon0)
+    cos_lon0 = math.cos(lon0)
 
-    def ecef_to_geodetic(x, y, z):
-        # Bowring’s method (robust & fast)
-        b = a * (1 - f)
-        ep_sq = (a * a - b * b) / (b * b)
-        p = np.sqrt(x * x + y * y)
-        th = np.arctan2(a * z, b * p)
-        lon = np.arctan2(y, x)
-        lat = np.arctan2(z + ep_sq * b * np.sin(th) ** 3, p - e_sq * a * np.cos(th) ** 3)
-        N = a / np.sqrt(1 - e_sq * np.sin(lat) ** 2)
-        alt = p / np.cos(lat) - N
-        return np.degrees(lat), np.degrees(lon), float(alt)
+    e = float(enu_vec[0])
+    n = float(enu_vec[1])
+    u = float(enu_vec[2])
 
-    ref_xyz = geodetic_to_ecef(ref_lat, ref_lon, ref_alt)
-    lat0 = np.radians(ref_lat)
-    lon0 = np.radians(ref_lon)
-    R = np.array(
-        [
-            [-np.sin(lon0), np.cos(lon0), 0.0],
-            [-np.sin(lat0) * np.cos(lon0), -np.sin(lat0) * np.sin(lon0), np.cos(lat0)],
-            [np.cos(lat0) * np.cos(lon0), np.cos(lat0) * np.sin(lon0), np.sin(lat0)],
-        ]
+    # R.T @ enu with the same ENU rotation matrix as geodetic_to_enu
+    x = xr - sin_lon0 * e - sin_lat0 * cos_lon0 * n + cos_lat0 * cos_lon0 * u
+    y = yr + cos_lon0 * e - sin_lat0 * sin_lon0 * n + cos_lat0 * sin_lon0 * u
+    z = zr + cos_lat0 * n + sin_lat0 * u
+
+    # Bowring’s method (robust & fast)
+    p = math.hypot(x, y)
+    th = math.atan2(_WGS84_A * z, _WGS84_B * p)
+    lon = math.atan2(y, x)
+    lat = math.atan2(
+        z + _WGS84_EP_SQ * _WGS84_B * math.sin(th) ** 3,
+        p - _WGS84_E_SQ * _WGS84_A * math.cos(th) ** 3,
     )
-    ecef = ref_xyz + R.T @ np.asarray(enu_vec, dtype=float)
-    return ecef_to_geodetic(*ecef)
+    n_rad = _WGS84_A / math.sqrt(1.0 - _WGS84_E_SQ * math.sin(lat) ** 2)
+    alt = p / math.cos(lat) - n_rad
+    return math.degrees(lat), math.degrees(lon), float(alt)
 
 
 def transfer_enu_between_refs(
@@ -220,7 +189,13 @@ def _angles_dist(rp: Position, h: float, p: float, tp: Position) -> tuple[float,
     return az_rel, el_rel, dist
 
 
-def _doppler(target: Unit, az_abs_deg: float, el_abs_deg: float, freq_hz: float) -> float:
+def _doppler(
+    target: Unit,
+    az_abs_deg: float,
+    el_abs_deg: float,
+    freq_hz: float,
+    radar_velocity=None,
+) -> float:
     """
     Doppler shift: f_d = (2 * f / c) * (v ⋅ r_hat)
     Inputs:
@@ -240,8 +215,33 @@ def _doppler(target: Unit, az_abs_deg: float, el_abs_deg: float, freq_hz: float)
             math.sin(er),
         ]
     )  # U
-    vrel = float(np.dot(np.asarray(target.velocity, dtype=float), r_hat))
+    target_velocity = np.asarray(target.velocity, dtype=float)
+    own_velocity = (
+        np.zeros(3, dtype=float)
+        if radar_velocity is None
+        else np.asarray(radar_velocity, dtype=float)
+    )
+    vrel = float(np.dot(target_velocity - own_velocity, r_hat))
     return 2.0 * freq_hz * vrel / 299_792_458.0
+
+
+def has_effective_earth_line_of_sight(
+    horizontal_range_m: float,
+    sensor_alt_m: float,
+    target_alt_m: float,
+    *,
+    effective_earth_radius_factor: float = 4.0 / 3.0,
+) -> bool:
+    """Return whether two airborne points are above the smooth-Earth horizon.
+
+    Terrain, ducting, multipath, and diffraction are outside this abstraction.
+    """
+    radius = rad_earth * float(effective_earth_radius_factor)
+    h1 = max(0.0, float(sensor_alt_m))
+    h2 = max(0.0, float(target_alt_m))
+    horizon_1 = math.sqrt(max(0.0, 2.0 * radius * h1 + h1 * h1))
+    horizon_2 = math.sqrt(max(0.0, 2.0 * radius * h2 + h2 * h2))
+    return float(horizontal_range_m) <= horizon_1 + horizon_2
 
 
 def to_cart(az_abs_deg: float, el_abs_deg: float, dist_m: float) -> tuple[float, float, float]:

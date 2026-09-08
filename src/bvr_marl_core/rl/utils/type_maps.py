@@ -5,7 +5,7 @@ Uses the core registries — extension code must not import concrete
 aircraft/missile classes directly.
 """
 
-from bvr_marl_core.registry import AIRCRAFT_REGISTRY, MISSILE_REGISTRY, get_aircraft_class
+from bvr_marl_core.registry import AIRCRAFT_REGISTRY, MISSILE_REGISTRY
 
 # Re-export the canonical maps so existing callers continue to work.
 AIRCRAFT_TYPE_MAP = {
@@ -40,25 +40,26 @@ def resolve_aircraft_config(cfg_env):
     """
     aircraft_config = {}
 
+    def _resolve(spec):
+        """Resolve a single type string or a list of them to class(es).
+
+        A plain string maps to one class (the whole team flies it); a list maps
+        to a list of classes assigned per slot and cycled downstream — this is
+        how a heterogeneous formation (e.g. an F-22 leading F-35s) is expressed.
+        """
+        if isinstance(spec, (list, tuple)):
+            return [_resolve(item) for item in spec]
+        if spec not in AIRCRAFT_TYPE_MAP:
+            raise ValueError(
+                f"Unknown aircraft type: {spec}. Available: {list(AIRCRAFT_TYPE_MAP.keys())}"
+            )
+        return AIRCRAFT_TYPE_MAP[spec]
+
     if "aircraft_config" in cfg_env:
         ac = cfg_env["aircraft_config"]
-        agent_type_str = ac.get("agent_type", "F22")
-        opponent_type_str = ac.get("opponent_type", "F22")
-
-        if agent_type_str not in AIRCRAFT_TYPE_MAP:
-            raise ValueError(
-                f"Unknown aircraft type: {agent_type_str}. "
-                f"Available: {list(AIRCRAFT_TYPE_MAP.keys())}"
-            )
-        if opponent_type_str not in AIRCRAFT_TYPE_MAP:
-            raise ValueError(
-                f"Unknown aircraft type: {opponent_type_str}. "
-                f"Available: {list(AIRCRAFT_TYPE_MAP.keys())}"
-            )
-
         aircraft_config["aircraft_types"] = {
-            "agent": AIRCRAFT_TYPE_MAP[agent_type_str],
-            "opponent": AIRCRAFT_TYPE_MAP[opponent_type_str],
+            "agent": _resolve(ac.get("agent_type", "F22")),
+            "opponent": _resolve(ac.get("opponent_type", "F22")),
         }
 
     return aircraft_config

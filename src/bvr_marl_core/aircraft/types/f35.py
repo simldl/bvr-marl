@@ -15,6 +15,7 @@ class F35(Aircraft):
 
         # Physics (geometry corrected)
         mass_kg: float = 13300.0
+        fuel_capacity_kg: float = 4500.0  # internal fuel (empty = mass - fuel)
         reference_area_m2: float = 42.7  # 460 ft^2  :contentReference[oaicite:14]{index=14}
         aspect_ratio: float = 2.68  # 10.7^2 / 42.7  :contentReference[oaicite:15]{index=15}
         oswald_e: float = 0.82
@@ -37,6 +38,7 @@ class F35(Aircraft):
         radar_beam_rate_hz: float = 8.0
         radar_beam_rate_p_hz: float = 6.0
         rcs: float = 0.005
+        irst_base_range_m: float = 50_000.0  # EOTS/DAS IRST
         # Passive Radar
         passive_radar_angular_error_deg: float = 5.0
         passive_radar_range_error_m: float = 2000.0

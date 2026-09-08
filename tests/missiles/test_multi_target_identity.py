@@ -66,27 +66,19 @@ def test_fox3_keeps_designated_target_with_multiple_valid_contacts():
     for _ in range(80):
         sim.do_tick()
 
-    missile = AIM120_AMRAAM(
-        firing_time_s=sim.elapsed_time_s,
-        target=primary,
-        source=shooter,
-        map_limits=ml,
-        group="blue",
-    )
+    missile, veto, _ = shooter.weapons.fire_missile_direct(sim, primary, AIM120_AMRAAM)
+    assert veto is None
     # Deterministic kill on contact (flat Pk) so this identity test does not
     # depend on the range-dependent kill-probability model.
     missile.hit_probability = 1.0
     missile.lethal_radius_m = 0.0
     missile.designated_target_id = primary.id
-    missile.retarget_policy = "locked_override"
-    missile.target_provider.current_target_id = primary.id
-    missile.radar.lock_ctrl.set_mode("track", primary.id)
-    missile.radar.locked_target = primary.id
-    sim.add_unit(missile)
+    missile.guidance_reliability = 1.0
+    missile.fuze_reliability = 1.0
+    missile.warhead_effectiveness = 1.0
 
     target_id_history = set()
     radar_lock_history = set()
-    missile_target_history = set()
     closest_primary_m = float("inf")
     closest_distractor_m = float("inf")
 
@@ -99,7 +91,7 @@ def test_fox3_keeps_designated_target_with_multiple_valid_contacts():
         if missile.id in sim.active_units:
             target_id_history.add(missile.target_provider.current_target_id)
             radar_lock_history.add(missile.radar.get_locked_target())
-            missile_target_history.add(getattr(missile.target, "id", None))
+            assert missile.target is None
             if primary.id in sim.active_units:
                 closest_primary_m = min(closest_primary_m, _dist3d(missile, primary))
             if distractor.id in sim.active_units:
@@ -110,8 +102,13 @@ def test_fox3_keeps_designated_target_with_multiple_valid_contacts():
             break
 
     assert target_id_history == {primary.id}
-    assert radar_lock_history == {primary.id}
-    assert missile_target_history == {primary.id}
-    assert primary.id not in sim.active_units
+    # A scanning seeker can temporarily have no hard lock, but must never lock
+    # the geometrically valid distractor.
+    assert primary.id in radar_lock_history
+    assert radar_lock_history <= {None, primary.id}
+    # The stochastic kill delay defers removal, so the identity of the kill is now
+    # carried by the mortally-hit flag: the primary is hit, the distractor is not.
+    assert primary.is_mortally_hit is True
+    assert not getattr(distractor, "is_mortally_hit", False)
     assert distractor.id in sim.active_units
     assert closest_primary_m < closest_distractor_m

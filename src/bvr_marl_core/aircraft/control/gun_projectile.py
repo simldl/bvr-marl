@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime
 
 import numpy as np
 
@@ -253,12 +252,18 @@ class GunSystem:
             )
 
         rounds_to_fire = min(self.burst_size, self.current_ammo)
+        streams = getattr(sim, "random_streams", None)
+        rng = (
+            streams.generator("gun_dispersion", getattr(self.parent, "id", 0))
+            if streams is not None
+            else np.random.default_rng(0)
+        )
 
         for i in range(rounds_to_fire):
             spread_factor = 0.02
-            spread_x = (np.random.random() - 0.5) * spread_factor * 1000
-            spread_y = (np.random.random() - 0.5) * spread_factor * 1000
-            spread_z = (np.random.random() - 0.5) * spread_factor * 500
+            spread_x = (rng.random() - 0.5) * spread_factor * 1000
+            spread_y = (rng.random() - 0.5) * spread_factor * 1000
+            spread_z = (rng.random() - 0.5) * spread_factor * 500
 
             spread_target = (
                 target_position[0]

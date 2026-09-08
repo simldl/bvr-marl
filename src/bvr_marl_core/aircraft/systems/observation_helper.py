@@ -10,10 +10,15 @@ Exposes first-class features from aircraft systems to BT/RL policy:
 - Weapons state (remaining missiles, cooldowns)
 """
 
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
+from bvr_marl_core.aircraft.systems.fire_feasibility import (
+    NO_TARGET_GATES,
+    evaluate_fire_gates,
+)
+from bvr_marl_core.domain.tactical_contact import TacticalContact
 from bvr_marl_core.simulator.utils.angles import signed_yaw_deg_diff
 from bvr_marl_core.simulator.utils.geodesics import geodetic_bearing_deg, geodetic_distance_km
 
@@ -50,11 +55,18 @@ class ObservationHelper:
 
         try:
             wez = self.aircraft.wez
-            dlz = wez.compute_dlz(target)
-            slant_range = wez._slant_range_m(self.aircraft, target)
+            if isinstance(target, TacticalContact):
+                estimate = wez.compute_dlz_from_track(target.state, target.covariance)
+                dlz = estimate.nominal
+                slant_range = float(np.linalg.norm(np.asarray(target.state[:3], dtype=float)))
+                sqi = wez.sqi_from_estimate(slant_range, estimate.closing_speed_mps, dlz)
+            else:
+                # Compatibility/oracle diagnostic path.
+                dlz = wez.compute_dlz(target)
+                slant_range = wez._slant_range_m(self.aircraft, target)
+                sqi = wez.sqi(self.aircraft, target, missile=None, dlz=dlz)
             zone = wez.zone_for_range(slant_range, dlz)
             nez_vis = wez.nez_visible(slant_range, dlz, show_in=("R2", "R3"))
-            sqi = wez.sqi(self.aircraft, target, missile=None, dlz=dlz)
 
             return {
                 "valid": True,
@@ -108,6 +120,39 @@ class ObservationHelper:
             }
 
         try:
+            if isinstance(target, TacticalContact):
+                state = np.asarray(target.state, dtype=float)
+                relative_position = state[:3]
+                slant_range = float(np.linalg.norm(relative_position))
+                bearing = float(np.degrees(np.arctan2(relative_position[0], relative_position[1])))
+                ata = abs(signed_yaw_deg_diff(self.aircraft.yaw_deg, bearing))
+                target_velocity = state[3:6]
+                target_speed = float(np.linalg.norm(target_velocity))
+                target_yaw = (
+                    float(np.degrees(np.arctan2(target_velocity[0], target_velocity[1])))
+                    if target_speed > 1e-9
+                    else 0.0
+                )
+                bearing_from_target = (bearing + 180.0) % 360.0
+                aspect = abs(signed_yaw_deg_diff(target_yaw, bearing_from_target))
+                own_velocity = np.array(
+                    [
+                        float(getattr(getattr(self.aircraft, "velocity", None), axis, 0.0))
+                        for axis in ("vx", "vy", "vz")
+                    ]
+                )
+                los = relative_position / max(slant_range, 1.0)
+                closure = -float(np.dot(los, target_velocity - own_velocity))
+                return {
+                    "valid": True,
+                    "ata_deg": ata,
+                    "aspect_deg": aspect,
+                    "aot_deg": 180.0 - aspect,
+                    "closure_rate_mps": closure,
+                    "bearing_deg": bearing,
+                    "slant_range_m": slant_range,
+                    "altitude_diff_m": -float(relative_position[2]),
+                }
             bearing = geodetic_bearing_deg(
                 self.aircraft.position.lat,
                 self.aircraft.position.lon,
@@ -205,14 +250,19 @@ class ObservationHelper:
                 # Match by nearest track position (state[:3]) to selected target's relative ENU.
                 # Track states are assumed to be in own-ENU; degrades gracefully otherwise.
                 try:
-                    dlat = (selected_target.position.lat - self.aircraft.position.lat) * 111000.0
-                    dlon = (
-                        (selected_target.position.lon - self.aircraft.position.lon)
-                        * 111000.0
-                        * np.cos(np.radians(self.aircraft.position.lat))
-                    )
-                    dalt = selected_target.position.alt - self.aircraft.position.alt
-                    rel_enu = np.array([dlon, dlat, dalt], dtype=float)
+                    if isinstance(selected_target, TacticalContact):
+                        rel_enu = np.asarray(selected_target.state[:3], dtype=float)
+                    else:
+                        dlat = (
+                            selected_target.position.lat - self.aircraft.position.lat
+                        ) * 111000.0
+                        dlon = (
+                            (selected_target.position.lon - self.aircraft.position.lon)
+                            * 111000.0
+                            * np.cos(np.radians(self.aircraft.position.lat))
+                        )
+                        dalt = selected_target.position.alt - self.aircraft.position.alt
+                        rel_enu = np.array([dlon, dlat, dalt], dtype=float)
 
                     _best_idx, best_dist = -1, float("inf")
                     for i, (state, score) in enumerate(prioritized):
@@ -221,7 +271,14 @@ class ObservationHelper:
                             if dist < best_dist:
                                 best_dist = dist
                                 selected_score = float(score)
-                except Exception:
+                except (
+                    AttributeError,
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                    IndexError,
+                    ZeroDivisionError,
+                ):
                     pass
 
             return {
@@ -239,68 +296,59 @@ class ObservationHelper:
                 "error": str(e),
             }
 
-    def get_fire_feasibility(self, target) -> dict[str, Any]:
+    def get_fire_feasibility(self, target, simulator=None) -> dict[str, Any]:
         """
-        Get fire feasibility flags (gates from WeaponSystem).
+        Get fire feasibility flags.
+
+        Thin adapter over :func:`~bvr_marl_core.aircraft.systems.fire_feasibility.evaluate_fire_gates`,
+        which is the single definition of "may this aircraft launch right now?" shared
+        with the shot-opportunity counter in the action-space layer. See that module for
+        why the two used to disagree and what it cost.
 
         Returns:
-        - radar_lock: bool
+        - radar_lock: bool (own radar only)
+        - datalink_lock: bool
         - target_in_fov: bool
         - gimbal_ok: bool (computed from ATA vs h_fov)
-        - radar_range_ok: bool
+        - radar_range_ok: bool (own-radar range gate)
+        - launch_range_ok: bool (datalink shots may launch beyond own radar range)
         - inventory_ok: bool
+        - cooldown_ok: bool (post-launch cooldown expired)
+        - target_not_saturated: bool (below the per-target missile cap)
         - can_fire: bool (all gates passed)
         - veto_reason: str or None
         """
         if not target:
-            return {
-                "radar_lock": False,
-                "target_in_fov": False,
-                "gimbal_ok": False,
-                "radar_range_ok": False,
-                "inventory_ok": False,
-                "can_fire": False,
-                "veto_reason": "no_target",
-            }
+            return NO_TARGET_GATES.as_dict()
 
-        try:
-            weapons = self.aircraft.weapons
-            feasibility = weapons.check_fire_feasibility(target)
-
-            geom = self.get_geometry_kinematics(target)
-            gimbal_ok = (
-                geom["ata_deg"] < (self.aircraft.radar.h_fov_deg / 2.0) if geom["valid"] else False
-            )
-            radar_range_ok = (
-                geom["slant_range_m"] <= (self.aircraft.radar.max_range_m * 0.95)
-                if geom["valid"]
-                else False
-            )
-
-            return {
-                "radar_lock": feasibility["radar_lock_ok"],
-                "target_in_fov": feasibility["fov_ok"],
-                "gimbal_ok": gimbal_ok,
-                "radar_range_ok": radar_range_ok,
-                "inventory_ok": feasibility["inventory_ok"],
-                "can_fire": feasibility["can_fire"] and gimbal_ok and radar_range_ok,
-                "veto_reason": feasibility.get("veto_reason"),
-                "remaining_missiles": feasibility["remaining_missiles"],
-            }
-        except Exception as e:
-            return {
-                "radar_lock": False,
-                "target_in_fov": False,
-                "gimbal_ok": False,
-                "radar_range_ok": False,
-                "inventory_ok": False,
-                "can_fire": False,
-                "veto_reason": f"error:{e}",
-                "remaining_missiles": 0,
-            }
+        return evaluate_fire_gates(
+            self.aircraft, target, simulator=simulator, obs_helper=self
+        ).as_dict()
 
     def get_lock_quality(self, target) -> dict[str, Any]:
         """Return lock quality metrics for the selected target."""
+        if isinstance(target, TacticalContact):
+            geom = self.get_geometry_kinematics(target)
+            locked_ids = set(self.aircraft.sensor.get_locked_targets() or ())
+            has_lock = target.track_id in locked_ids
+            fov_half = float(getattr(self.aircraft.radar, "h_fov_deg", 90.0)) * 0.5
+            radar_max = float(getattr(self.aircraft.radar, "max_range_m", 1.0))
+            ata_margin = max(0.0, fov_half - float(geom.get("ata_deg", fov_half)))
+            range_margin = max(0.0, radar_max - float(geom.get("slant_range_m", radar_max)))
+            geometric_quality = 0.6 * min(1.0, ata_margin / 30.0) + 0.4 * min(
+                1.0, range_margin / 20_000.0
+            )
+            return {
+                "valid": True,
+                "has_lock": has_lock,
+                "ata_margin_deg": ata_margin,
+                "range_margin": range_margin,
+                "lock_strength": (
+                    float(np.clip(target.confidence * geometric_quality, 0.0, 1.0))
+                    if has_lock
+                    else 0.0
+                ),
+            }
         metrics = getattr(self.aircraft, "metrics", None)
         if metrics is not None and hasattr(metrics, "get_lock_quality"):
             return metrics.get_lock_quality(target)

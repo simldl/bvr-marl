@@ -17,12 +17,27 @@
 #     `terminal_range_m` for a clearer name.
 
 import math
-from typing import Optional
 
 import numpy as np
 
 from bvr_marl_core.radar.core.utils import geodetic_to_enu
 from bvr_marl_core.simulator.utils.angles import normalize_angle
+
+
+def _cross3(a, b) -> np.ndarray:
+    """Cross product for 3-vectors (avoids np.cross overhead on tiny arrays)."""
+    return np.array(
+        (
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        )
+    )
+
+
+def _norm3(v) -> float:
+    """Euclidean norm of a 3-vector (avoids np.linalg.norm overhead)."""
+    return math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
 
 
 class PnPropNavGuidance:
@@ -56,6 +71,21 @@ class PnPropNavGuidance:
         self.missile = missile
         self.PN_N = float(pn_n)
         self.pn_law = int(pn_law)
+
+        # Augmented PN: add a target-acceleration term so the missile leads a
+        # maneuvering target instead of chasing its past LOS. Enabled per weapon.
+        self.use_apn = bool(getattr(missile, "use_apn", False))
+        self._prev_vt: np.ndarray | None = None
+        self._apn_accel = np.zeros(3, dtype=float)  # EMA of estimated target accel
+        self._APN_ALPHA = 0.2
+        self._APN_MAX_G = 9.0
+        # Cap the t_go used in the ZEM acceleration term: 0.5 a t_go^2 amplifies any
+        # accel-estimate error quadratically, so bound it to a short horizon.
+        self._APN_TGO_CAP_S = 2.5
+        # Only augment for a clearly significant, sustained maneuver. Below this the
+        # finite-difference accel from a CV-KF is mostly lag/noise, so augmenting
+        # would hurt; APN then behaves exactly like PN for gentle/straight targets.
+        self._APN_MIN_ACCEL = 4.0 * 9.80665
 
         # NOTE: despite the historical name, this is used as a slant-range gate (meters).
         self.ALTITUDE_THRESHOLD = float(altitude_threshold)
@@ -100,7 +130,7 @@ class PnPropNavGuidance:
             pitch_deg=current_pitch_deg,
             speed_mps=float(getattr(self.missile, "speed", 0.0)),
         )
-        Vm_mag = max(float(np.linalg.norm(Vm_vec)), 1.0)
+        Vm_mag = max(_norm3(Vm_vec), 1.0)
         Vmh = Vm_vec / Vm_mag
 
         # Coherent (p, v) from same KF snapshot eliminates position/velocity time skew.
@@ -121,7 +151,7 @@ class PnPropNavGuidance:
                 ),
                 dtype=float,
             )
-        R = max(float(np.linalg.norm(R_vec)), 1e-9)
+        R = max(_norm3(R_vec), 1e-9)
         Ulos = self._unit(R_vec)
 
         # Hold-last-valid: avoids zero-velocity fallback (pure-pursuit for lateral movers).
@@ -139,7 +169,14 @@ class PnPropNavGuidance:
 
         Vrel = Vt_vec - Vm_vec
         Vc = max(1e-6, -float(np.dot(Vrel, Ulos)))  # closing speed (positive if closing)
-        Omega = np.cross(R_vec, Vrel) / (R * R)  # LOS rate [rad/s]
+        Omega = _cross3(R_vec, Vrel) / (R * R)  # LOS rate [rad/s]
+
+        # Augmented PN: estimate the target's acceleration from the change in its
+        # tracked velocity (EMA-smoothed and clipped to a plausible maneuver). Only
+        # updated on a *fresh* tracker velocity — differencing a held/stale velocity
+        # would inject spurious acceleration.
+        vt_fresh = tracker_v is not None
+        a_tgt = self._estimate_target_accel(Vt_vec, tick_secs, vt_fresh) if self.use_apn else None
 
         if phase == "terminal" or R < self.ALTITUDE_THRESHOLD:
             law = self.PN_ZEM
@@ -152,13 +189,19 @@ class PnPropNavGuidance:
             N_nav = self.PN_N
 
         if law == self.PN_ZEM:
-            a_cmd = self._zem_guidance(R_vec, Vrel, Ulos, Vc, N_nav)
+            a_cmd = self._zem_guidance(R_vec, Vrel, Ulos, Vc, N_nav, a_tgt=a_tgt)
         elif law == self.PN_TRUE:
-            a_cmd = N_nav * Vc * np.cross(Omega, Ulos)  # True PN
+            a_cmd = N_nav * Vc * _cross3(Omega, Ulos)  # True PN
         elif law == self.PN_PURE:
-            a_cmd = N_nav * Vc * np.cross(Omega, Vmh)  # Pure (energy-conserving) PN
+            a_cmd = N_nav * Vc * _cross3(Omega, Vmh)  # Pure (energy-conserving) PN
         else:
-            a_cmd = N_nav * Vc * np.cross(Omega, Ulos)  # default to True PN
+            a_cmd = N_nav * Vc * _cross3(Omega, Ulos)  # default to True PN
+
+        # APN augmentation for the (non-ZEM) PN laws: add the half-N target-accel
+        # term normal to the LOS. (ZEM is augmented inside _zem_guidance.)
+        if a_tgt is not None and law != self.PN_ZEM:
+            a_perp = a_tgt - np.dot(a_tgt, Ulos) * Ulos
+            a_cmd = a_cmd + 0.5 * N_nav * a_perp
 
         # Lateral-only guidance command (remove along-velocity component)
         a_cmd = self._lateral_only(a_cmd, Vmh)
@@ -167,10 +210,10 @@ class PnPropNavGuidance:
         # Velocity-aligned frame: f (forward), u (up ⟂ f), l (left)
         k_world = np.array([0.0, 0.0, 1.0])
         f = Vmh
-        u = k_world - np.dot(k_world, f) * f
-        u_norm = np.linalg.norm(u)
+        u = k_world - f[2] * f  # k_world·f == f[2]
+        u_norm = _norm3(u)
         u = np.array([0.0, 0.0, 1.0]) if u_norm < 1e-9 else (u / u_norm)
-        lateral = np.cross(u, f)  # left lateral
+        lateral = _cross3(u, f)  # left lateral
 
         a_lat = float(np.dot(a_cmd, lateral))  # lateral → yaw
         a_vert = float(np.dot(a_cmd, u))  # vertical → pitch
@@ -181,7 +224,7 @@ class PnPropNavGuidance:
             f[1] + (a_lat * lateral[1] + a_vert * u[1]) / Vm_mag * tick_secs,
             f[2] + (a_lat * lateral[2] + a_vert * u[2]) / Vm_mag * tick_secs,
         ]
-        vn = max(1e-9, float(np.linalg.norm(vhat_p)))
+        vn = max(1e-9, _norm3(vhat_p))
         vhat_p = [vhat_p[0] / vn, vhat_p[1] / vn, vhat_p[2] / vn]
 
         # CW-from-North yaw: atan2(E, N)
@@ -197,25 +240,61 @@ class PnPropNavGuidance:
         return float(desired_yaw_deg), float(desired_pitch_deg)
 
     def _unit(self, v: np.ndarray) -> np.ndarray:
-        n = float(np.linalg.norm(v))
+        n = _norm3(v)
         return v / n if n > 1e-12 else np.zeros(3, dtype=float)
 
     def _time_to_go(self, R_vec: np.ndarray, Ulos: np.ndarray, Vrel: np.ndarray) -> float:
         Vc = max(1e-6, -float(np.dot(Vrel, Ulos)))
-        return float(np.linalg.norm(R_vec)) / Vc
+        return _norm3(R_vec) / Vc
+
+    def _estimate_target_accel(
+        self, Vt_vec: np.ndarray, tick_secs: float, vt_fresh: bool
+    ) -> np.ndarray:
+        """EMA-smoothed, clipped estimate of target acceleration in missile ENU.
+
+        Differentiates the tracked target velocity between fresh KF updates. The
+        result is smoothed (velocity is a noisy KF output) and clipped to a plausible
+        target maneuver so a transient does not saturate the command. On a stale
+        (held) velocity the estimate is decayed toward zero rather than differenced.
+        """
+        if not vt_fresh:
+            self._apn_accel *= 1.0 - self._APN_ALPHA
+            return self._apn_accel.copy()
+        if self._prev_vt is not None and tick_secs > 1e-6:
+            raw = (Vt_vec - self._prev_vt) / tick_secs
+            self._apn_accel = (1.0 - self._APN_ALPHA) * self._apn_accel + self._APN_ALPHA * raw
+            a_max = self._APN_MAX_G * self.g
+            mag = _norm3(self._apn_accel)
+            if mag > a_max:
+                self._apn_accel = self._apn_accel * (a_max / mag)
+        self._prev_vt = Vt_vec.copy()
+        # Gate out gentle maneuvers / noise: only a clearly hard turn is augmented.
+        if _norm3(self._apn_accel) < self._APN_MIN_ACCEL:
+            return np.zeros(3, dtype=float)
+        return self._apn_accel.copy()
 
     def _zem_guidance(
-        self, R_vec: np.ndarray, Vrel: np.ndarray, Ulos: np.ndarray, Vc: float, N: float
+        self,
+        R_vec: np.ndarray,
+        Vrel: np.ndarray,
+        Ulos: np.ndarray,
+        Vc: float,
+        N: float,
+        a_tgt: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Zero-Effort Miss normal to LOS with GCP applied later:
-          ZEM = R + Vrel * t_go,  ZEM_⊥ = ZEM - (ZEM·û_LOS)û_LOS,
+          ZEM = R + Vrel * t_go [+ 0.5 a_target t_go^2],  ZEM_⊥ = ZEM - (ZEM·û_LOS)û_LOS,
           a_cmd = N * ZEM_⊥ / t_go^2
+        The optional target-acceleration term makes this augmented (APN) ZEM.
         """
         tgo = self._time_to_go(R_vec, Ulos, Vrel)
         if tgo <= 1e-6:
             return np.zeros(3, dtype=float)
         ZEM = R_vec + Vrel * tgo
+        if a_tgt is not None:
+            tgo_aug = min(tgo, self._APN_TGO_CAP_S)
+            ZEM = ZEM + 0.5 * a_tgt * (tgo_aug * tgo_aug)
         ZEM_r = np.dot(ZEM, Ulos) * Ulos
         ZEM_n = ZEM - ZEM_r
         return (N * ZEM_n) / (tgo * tgo)
@@ -227,7 +306,7 @@ class PnPropNavGuidance:
     def _limit_acceleration(self, a_cmd: np.ndarray) -> np.ndarray:
         n_max = float(getattr(self.missile, "n_max", 30.0))
         a_max = n_max * self.g
-        mag = float(np.linalg.norm(a_cmd))
+        mag = _norm3(a_cmd)
         return (a_max / mag) * a_cmd if mag > a_max else a_cmd
 
     def _missile_velocity_vec(
@@ -332,7 +411,7 @@ class PnPropNavGuidance:
             if np.linalg.det(R) < 0.0:
                 U[:, -1] *= -1.0
                 R = U @ Vt
-        except Exception:
+        except (ValueError, TypeError):
             pass
         return R
 

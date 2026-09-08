@@ -124,6 +124,40 @@ class MissileAutomation:
         for tid in targets_to_remove:
             del self.missiles_per_target[tid]
 
+    @staticmethod
+    def weapons_in_flight(unit, active_units):
+        """A shooter's own weapons that are still airborne."""
+        return [
+            missile
+            for missile in getattr(unit, "missiles", None) or ()
+            if getattr(missile, "id", None) in (active_units or {})
+        ]
+
+    def sync_missiles_in_flight(self, missiles):
+        """Rebuild the per-target tally from the weapons actually still in flight.
+
+        Saturation means "this many weapons are *currently* committed to that target",
+        so the tally has to be derived rather than accumulated. Accumulating it needs a
+        matching expiry, and there is no correct one here: a sensor-limited shooter
+        selects in contact space, so expiring against unit ids (the only expiry that
+        existed, and oracle-gated at that) either never fires or fires on a coincidental
+        id collision. Left accumulating, the cap latches permanently -- once an agent
+        has fired its quota at a contact it can never engage that contact again, however
+        long ago those weapons were spent.
+
+        Keys stay in whichever namespace the shooter committed in: the launch contact
+        for a weapon-track shot, the designated unit for an oracle/legacy one. No truth
+        is consulted -- these are the shooter's own weapons.
+        """
+        counts: dict = {}
+        for missile in missiles:
+            key = getattr(missile, "launch_contact_id", None)
+            if key is None:
+                key = getattr(missile, "designated_target_id", None)
+            if key is not None:
+                counts[key] = counts.get(key, 0) + 1
+        self.missiles_per_target = counts
+
     def get_missiles_at_target(self, target_id: int) -> int:
         """Get count of missiles fired at a target."""
         return self.missiles_per_target.get(target_id, 0)

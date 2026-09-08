@@ -3,12 +3,12 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bvr-marl-core"
+name = "bvr-marl"
 version = "0.1.0"
-description = "BVR-MARL Core: BVR air combat simulation engine with RL environments, physics, and training infrastructure"
+description = "BVR air-combat simulation engine with reinforcement-learning environments and training infrastructure."
 readme = "README.md"
 authors = [
-    { name = "Simon Schosser", email = "simon.schosser@unibw.com" }
+    { name = "Simon Schosser", email = "simon.schosser@unibw.de" }
 ]
 license = "MIT"
 requires-python = ">=3.12,<3.13"
@@ -33,7 +33,7 @@ dependencies = [
     "geographiclib>=2.0",
     "pycairo>=1.20.0",
     "colorful>=0.5.6",
-    "tqdm",
+    "tqdm>=4.66",
     "click>=8.1.8",
     "streamlit>=1.30.0",
     "rpds-py>=0.18.0",
@@ -42,13 +42,25 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = [
-    "torch[cuda]>=2.7.0",
     "GPUtil>=1.4.0",
 ]
 dev = [
     "pytest>=8.3.5",
-    "ruff>=0.4.0",
+    # Pinned exactly, not floored. Ruff's formatter output is not stable across
+    # releases: 0.16.0 promoted Markdown code-block formatting out of preview and
+    # began rewriting Python examples inside .md files, which broke CI on
+    # documentation nobody had touched. A floor lets any release change the
+    # formatting contract mid-stream and fail unrelated pull requests.
+    # To upgrade: bump this pin and the one in the extension package's CI workflow
+    # together, run `ruff format src/ tests/ scripts/`, and commit the result as
+    # its own change so the reformat is never mixed into a feature diff.
+    "ruff==0.16.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/simldl/bvr-marl"
+Repository = "https://github.com/simldl/bvr-marl"
+Issues = "https://github.com/simldl/bvr-marl/issues"
 
 [project.scripts]
 bvr-train         = "bvr_marl_core.training.train:main"
@@ -60,6 +72,7 @@ bvr-view-public   = "bvr_marl_core.public.visualize:main"
 bvr-export-plots  = "bvr_marl_core.analysis.export_plots:main"
 bvr-tacview       = "bvr_marl_core.tacview.generate:main"
 bvr-gui           = "bvr_marl_core.gui_launcher:main"
+bvr-validate      = "bvr_marl_core.validation.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -69,6 +82,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "bvr_marl_core" = [
+    "py.typed",
+    "*.pyi",
     "gui/*.yaml",
     "configs/shared/*.yaml",
     "configs/training/*.yaml",
@@ -78,6 +93,7 @@ where = ["src"]
     "configs/tacview/*.yaml",
     "visualization/config/*.yaml",
     "visualization/configs/*.yaml",
+    "visualization/symbols/png/**/*.png",
     "tacview/*.yaml",
 ]
 
@@ -100,8 +116,21 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP"]
-ignore = ["E501", "F401", "UP007"]
+# TID bans relative imports: every intra-package import is absolute, so a module's
+# dependencies are readable without knowing where the file sits in the tree.
+select = ["E", "F", "W", "I", "UP", "TID"]
+ignore = ["E501", "UP007"]
+
+[tool.ruff.lint.per-file-ignores]
+# Type stubs re-export the public surface with explicit `X as X` aliases and
+# are grouped by source module for readability; skip import-sorting there.
+# Relative re-exports are the idiomatic form in stubs, so TID252 is off too.
+"*.pyi" = ["I001", "TID252"]
+# Some tests intentionally verify import availability without using the symbol.
+"tests/**/*.py" = ["F401"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
 known-first-party = ["bvr_marl_core"]

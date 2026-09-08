@@ -1,11 +1,53 @@
 # BVR-MARL: Public Baseline Platform for BVR Air-Combat Reinforcement Learning
 
-[![CI](https://github.com/simldl/bvr-marl/actions/workflows/ci.yml/badge.svg)](https://github.com/simldl/bvr-marl-core/actions/workflows/ci.yml)
+[![CI](https://github.com/simldl/bvr-marl/actions/workflows/ci.yml/badge.svg)](https://github.com/simldl/bvr-marl/actions/workflows/ci.yml)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-The public baseline platform for BVR (Beyond Visual Range) air-combat simulation and reinforcement learning. A standalone package covering the complete pipeline from physics and scenario generation through RL environment, training, live visualization, Tacview export, and analysis  ready to use out of the box and designed to be extended via clean protocol interfaces.
+The public baseline platform for BVR (Beyond Visual Range) air-combat simulation and reinforcement learning. A standalone package covering the complete pipeline from physics and scenario generation through RL environment, training, live visualization, Tacview export, and analysis—ready to use out of the box and designed to be extended via clean protocol interfaces.
+
+## About This Release
+
+**This is an updated release, and it goes beyond the scope of the published paper.** The
+version that corresponds to the paper is the previous commit on `main`; check it out if you
+need the exact configuration the published results were produced with.
+
+Since then the simulator has been corrected in several places and extended in others. The
+corrections matter most, because a few of them change measured outcomes:
+
+- **Terminal engagement.** An active seeker now re-associates onto its own track after
+  acquisition instead of discarding it on an identity mismatch, which had left weapons
+  dead-reckoning through the endgame. This moves kill rates throughout.
+- **Launch authority.** The launch-range gate is the missile's dynamic launch zone rather
+  than radar range alone, and accounts for target aspect, altitude delta, and time of
+  flight. A long-range radar no longer implies a viable shot.
+- **One fire-feasibility predicate.** The can-fire observation bit, the shot-opportunity
+  metric, and the launch gate itself are now the same evaluation; previously three
+  hand-written variants disagreed with each other.
+- **Track confidence** is calibrated against the tracker's measured distribution, so
+  thresholds are reachable at BVR range rather than silently acting as "never".
+- **Contact-slot identity** is reset per episode and binned over occupied slots, fixing
+  stale contacts accumulating across episodes in a reused environment.
+
+Capabilities added beyond what the paper describes include passive IRST, radar emission
+control (EMCON) as an agent decision with scripted baselines, a fuel model, radar
+identification and battle-damage-assessment observation features, A-pole/F-pole timeline
+estimates, an information firewall enforced at runtime, a networked-datalink weapon class,
+and a seeded verification and validation suite (`python -m bvr_marl_core.validation.cli`).
+
+Two notes on scope. The reward calculator shipped here is the terminal-only baseline —
+kills, own losses, boundary violations, and a last-team-standing bonus — so the dense
+shaping suite the paper sketches is not part of this package; the enemy-fighter
+observation token exposes an extension point (`ef_extra_dim`) for widening it, and the
+reward calculator is designed to be replaced wholesale.
+
+Three training additions address failures observed in long curriculum runs, and each is
+**active by default** rather than opt-in: critic warm-up (`critic_warmup_iterations: 15`),
+a floored KL coefficient (`kl_coeff_floor: 0.003`), and separate actor/critic gradient
+clipping (`policy_grad_clip: 10.0`). Set each to `0`, `0.0` and `null` respectively to
+recover stock RLlib behaviour — worth doing if you are comparing against a stock PPO
+baseline.
 
 ## Quick Start
 
@@ -64,7 +106,7 @@ bvr-view
 The repository is organized as a single public platform with structured package areas:
 
 ```
-bvr-marl-core/
+bvr-marl/
 |-- src/bvr_marl_core/
 |   |-- aircraft/          # Aircraft models, systems, and observation helpers
 |   |-- missiles/          # Missile guidance and physics
@@ -96,14 +138,14 @@ bvr-marl-core/
 ## Installation
 
 ### Prerequisites
-- Python 3.12+
+- Python 3.12
 - Node.js (for visualization symbols)
 - CUDA 12.8+ (optional, for GPU acceleration)
 
 ### Install from Source
 ```bash
-git clone https://github.com/simldl/bvr-marl-core
-cd bvr-marl-core
+git clone https://github.com/simldl/bvr-marl
+cd bvr-marl
 pip install -e .
 
 # Generate visualization symbols (required for proper tactical symbol display)
@@ -200,6 +242,25 @@ env:
   agent_aircraft_type: "F22"
   opponent_aircraft_type: "Su57"
   datalink_mode: full    # full | own | none | other | msl_support
+
+  random_map:
+    min_separation_m: 40000
+    # Optional upper bound on spawn separation. Omit for the historical
+    # floor-only behaviour. Set it on stages that must train weapon employment
+    # rather than transit — with a floor alone a large map routinely spawns both
+    # teams beyond radar range, so an agent spends the episode in transit and
+    # never reaches a position from which weapon employment can be learned.
+    max_separation_m: 100000
+```
+
+```yaml
+training:
+  # Iterations at the start of each run during which only the value function
+  # receives gradient. Curriculum promotion warm-starts the whole module, so the
+  # next stage inherits a critic calibrated to the previous stage's return scale.
+  # 0 restores stock RLlib behaviour. The rationale is documented in
+  # `rl/training/critic_warmup_learner.py`.
+  critic_warmup_iterations: 15
 ```
 
 ### Tacview Export
@@ -312,6 +373,58 @@ npm install --global windows-build-tools
 python -c "import ray; ray.init(); print(ray.cluster_resources())"
 ```
 
+## Development
+
+Install the dev extras first (`pip install -e ".[dev]"`), then run the same checks
+CI runs. Running all of them locally reproduces the pipeline:
+
+```bash
+# Tests — the slow marker separates simulation-heavy suites
+pytest tests/ -m "not slow"
+pytest tests/ -m "slow"
+pytest tests/                       # everything
+
+# Lint and format
+ruff check src/ tests/ scripts/
+ruff check src/ tests/ scripts/ --fix
+ruff format src/ tests/ scripts/
+
+# Source encoding (UTF-8, no BOM)
+python scripts/check_encoding.py
+
+# Import-boundary enforcement
+python scripts/check_import_boundaries.py
+```
+
+### Project conventions
+
+- Python 3.12 syntax and type hints,
+- `from __future__ import annotations` in modules,
+- stdlib / third-party / first-party import ordering,
+- **absolute imports only** — relative imports are rejected by `TID252`, so a
+  module's dependencies read the same wherever the file sits in the tree. Type
+  stubs (`*.pyi`) are exempt, since relative re-export is idiomatic there,
+- catch the exceptions a call can actually raise rather than bare `except
+  Exception`; where a broad catch is deliberate (a third-party boundary, or a
+  hot loop that must never abort a tick) mark it `# noqa: BLE001` **with a
+  reason**,
+- diagnostics belong in `logging`, not `print`, anywhere that runs per tick or
+  per episode — `print` is reserved for CLI and report output.
+
+### Architecture decisions
+
+The information firewall is the load-bearing one: operational decisions consume the
+chain `SensorReport -> TrackSnapshot -> TacticalContact -> WeaponTrack`, and none of
+those records carries a simulator entity handle. Sensor-limited mode is the default
+and fails closed, so a policy or controller cannot reach ground truth by accident.
+Read `domain/truth_access_guard.py` and the architecture tests under
+`tests/architecture/` before changing how information flows between sensors, tracks,
+and agents.
+
+Validation study outputs (physics envelopes, radar detection, tracking, missile
+effectiveness) are regenerated with `python scripts/validation/run_studies.py`, which
+writes them under `docs/validation/results/`.
+
 ## Citation
 
 If you use this environment in your research, please cite:
@@ -326,6 +439,10 @@ title = {Multi-Agent Reinforcement Learning Environment for Beyond Visual Range 
 doi = {10.2514/6.2026-1592}
 }
 ```
+
+Note that this release has moved beyond the paper — see [About This Release](#about-this-release).
+Work reproducing the published results should use the previous commit on `main`, which is the
+version the paper describes.
 
 ## Issues & Support
 

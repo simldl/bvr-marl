@@ -157,26 +157,11 @@ def test_radar_detection_probabilities_match_lut_and_rcs(tmp_path):
 
         if trks:
             got_any_track = True
-            for (
-                tid,
-                x6,
-                P3,
-                tgt,
-                utype,
-                ref,
-                conf,
-                n_obs,
-                life,
-                upd_cnt,
-                is_dec,
-                suspect_dec,
-                eng_id,
-                jam_id,
-                engageable,
-            ) in trks:
+            for track in trks:
                 print(
-                    f"  track tid={tid} conf={conf:.2f} n_obs={n_obs} life={life} upd={upd_cnt} "
-                    f"engageable={engageable} tgt_id={getattr(tgt, 'id', None)}"
+                    f"  track tid={track.track_id} conf={track.confidence:.2f} "
+                    f"n_obs={len(track.source_ids)} life={track.lifetime_s:.1f} "
+                    f"engageable={track.engageable}"
                 )
 
         locked_ids = radar.lock_ctrl.locked_target_ids()

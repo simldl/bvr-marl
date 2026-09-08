@@ -32,12 +32,8 @@ Adding fields to a DTO
 3. Update all sites that construct the affected DTO.
 """
 
-from .commands import (
-    ControlCommand,
-    FireCommand,
-    ManeuverCommand,
-)
-from .events import (
+from bvr_marl_core.domain.commands import ControlCommand, FireCommand, ManeuverCommand
+from bvr_marl_core.domain.events import (
     DetectionEvent,
     HitEvent,
     KillEvent,
@@ -46,7 +42,15 @@ from .events import (
     ScenarioEndEvent,
     ScenarioStartEvent,
 )
-from .state import (
+from bvr_marl_core.domain.information import (
+    ReportId,
+    ReportLineage,
+    SensorId,
+    SensorReport,
+    TrackSnapshot,
+    WeaponTrack,
+)
+from bvr_marl_core.domain.state import (
     EngagementState,
     PlatformState,
     SensorState,
@@ -54,8 +58,31 @@ from .state import (
     TrackState,
     WeaponState,
 )
+from bvr_marl_core.domain.tactical_contact import (
+    DEFAULT_CONTACT_SLOTS,
+    PINNED_ACTION_LOG_STD,
+    TacticalContact,
+    action_value_for_contact_slot,
+    entropy_of_pinned_axes,
+)
+from bvr_marl_core.domain.track_confidence import (
+    CONFIDENCE_BANDS,
+    TRACK_CONFIDENCE_COMMIT,
+    TRACK_CONFIDENCE_FIRM,
+    TRACK_CONFIDENCE_PROBABLE,
+    TRACK_CONFIDENCE_SHOOT,
+    TRACK_CONFIDENCE_TENTATIVE,
+    confidence_band,
+)
 
 __all__ = [
+    "CONFIDENCE_BANDS",
+    "TRACK_CONFIDENCE_COMMIT",
+    "TRACK_CONFIDENCE_FIRM",
+    "TRACK_CONFIDENCE_PROBABLE",
+    "TRACK_CONFIDENCE_SHOOT",
+    "TRACK_CONFIDENCE_TENTATIVE",
+    "confidence_band",
     # state
     "PlatformState",
     "SensorState",
@@ -63,6 +90,13 @@ __all__ = [
     "TrackState",
     "EngagementState",
     "SimMetadata",
+    "TacticalContact",
+    # Target-slot action mapping: callers that pin or initialize the target-selection
+    # action must derive the value from the same binning `select` uses.
+    "DEFAULT_CONTACT_SLOTS",
+    "PINNED_ACTION_LOG_STD",
+    "action_value_for_contact_slot",
+    "entropy_of_pinned_axes",
     # commands
     "ControlCommand",
     "FireCommand",
@@ -75,4 +109,11 @@ __all__ = [
     "LockChangeEvent",
     "ScenarioStartEvent",
     "ScenarioEndEvent",
+    # operational information
+    "SensorId",
+    "ReportId",
+    "ReportLineage",
+    "SensorReport",
+    "TrackSnapshot",
+    "WeaponTrack",
 ]

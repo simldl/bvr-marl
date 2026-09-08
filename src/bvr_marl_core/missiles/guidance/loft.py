@@ -34,13 +34,13 @@ class LoftGuidance(BaseGuidanceMode):
             slant = math.sqrt(dlat * dlat + dlon * dlon + dz * dz)
             if slant < float(min_loft_range_m):
                 return None
-        except Exception:
+        except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
             pass
 
         try:
             if missile.position.alt > (target_pos.alt + float(alt_guard_m)):
                 return None
-        except Exception:
+        except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
             pass
 
         try:

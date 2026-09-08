@@ -94,7 +94,7 @@ _THEME_TOKENS: dict[str, dict[str, str]] = {
 }
 
 
-def _normalize_theme_mode(theme_mode: str | None) -> str:
+def normalize_theme_mode(theme_mode: str | None) -> str:
     """Return a supported theme mode."""
     if theme_mode == "dark":
         return "dark"
@@ -103,7 +103,7 @@ def _normalize_theme_mode(theme_mode: str | None) -> str:
 
 def _css_variables(theme_mode: str) -> str:
     """Convert the selected token set into CSS variables."""
-    tokens = _THEME_TOKENS[_normalize_theme_mode(theme_mode)]
+    tokens = _THEME_TOKENS[normalize_theme_mode(theme_mode)]
     return "\n".join(f"            {name}: {value};" for name, value in tokens.items())
 
 

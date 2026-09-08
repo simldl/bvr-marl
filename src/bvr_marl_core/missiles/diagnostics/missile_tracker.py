@@ -71,7 +71,7 @@ class MissileDiagnostics:
         if hasattr(missile.radar, "get_locked_target"):
             try:
                 locked_target = missile.radar.get_locked_target()
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
         self.missile_data[missile_id]["locked_target"].append(locked_target)
 
@@ -138,14 +138,14 @@ class MissileDiagnostics:
                 dist_km = units_distance_km(missile, missile.target)
                 if dist_km > 100.0:
                     return f"too_far({dist_km:.1f}km)"
-            except Exception:
+            except (ImportError, AttributeError, TypeError, ValueError, ZeroDivisionError):
                 pass
 
         locked_target = None
         if hasattr(missile.radar, "get_locked_target"):
             try:
                 locked_target = missile.radar.get_locked_target()
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
 
         if locked_target is None and missile.elapsed_time_s > 120.0:

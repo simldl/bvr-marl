@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from bvr_marl_core.rl.environment.spaces.action_space import ActionProcessor
+from tests.mocks.identity import declare_unit_identity
 
 
 class TestActionSpaceIntegration:
@@ -37,6 +38,8 @@ class TestActionSpaceIntegration:
         unit.yaw_deg = 0.0
         unit.missile_types = ["AIM-120"]
         unit.remaining_missiles = 4  # Add missile inventory
+        # Real identity, not fabricated: the action processor walks unit.missiles.
+        declare_unit_identity(unit)
 
         # Mock position
         unit.position = Mock()
@@ -125,7 +128,7 @@ class TestActionSpaceIntegration:
 
     @pytest.fixture
     def action_processor(self, mock_simulator):
-        return ActionProcessor(mock_simulator)
+        return ActionProcessor(mock_simulator, information_mode="oracle")
 
     def test_missile_fires_only_with_lock_and_fov(
         self, action_processor, mock_simulator, mock_unit, mock_target
@@ -135,7 +138,7 @@ class TestActionSpaceIntegration:
         agent_id = 1
         mock_simulator.active_units[agent_id] = mock_unit
 
-        action = np.array([0.5, 0.5, 0.5, 0.5, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0])  # action[4]=0.8
+        action = np.array([0.5, 0.5, 0.5, 0.8, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])  # action[3]=0.8
 
         # Track fire results
         fire_results = []
@@ -209,7 +212,7 @@ class TestActionSpaceIntegration:
         mock_simulator.active_units[agent_id] = mock_unit
         mock_simulator.tick_secs = 0.1  # 100ms time step
 
-        action = np.array([0.5, 0.5, 0.5, 0.5, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0])  # action[4]=0.8
+        action = np.array([0.5, 0.5, 0.5, 0.8, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])  # action[3]=0.8
 
         # Mock successful conditions
         mock_simulator.active_units[mock_target.id] = mock_target
@@ -265,7 +268,7 @@ class TestActionSpaceIntegration:
         targets = [target1, target2]
 
         # First action selects target 0 (closer)
-        action1 = np.array([0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # action[3]=0.0
+        action1 = np.array([0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # action[4]=0.0
         with patch.object(
             action_processor.target_sorter, "sort_target_candidates", return_value=targets
         ):
@@ -275,7 +278,7 @@ class TestActionSpaceIntegration:
         assert state["target_index"] == 0  # Should select first target
 
         # Try to change to target 1 immediately - should be sticky
-        action2 = np.array([0.5, 0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # action[3]=1.0
+        action2 = np.array([0.5, 0.5, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # action[4]=1.0
         with patch.object(
             action_processor.target_sorter, "sort_target_candidates", return_value=targets
         ):
@@ -323,7 +326,7 @@ class TestActionSpaceIntegration:
         agent_id = 1
         mock_simulator.active_units[agent_id] = mock_unit
 
-        action = np.array([0.5, 0.5, 0.5, 0.5, 0.8, 0.8, 0.0, 0.0, 0.0, 0.0])
+        action = np.array([0.5, 0.5, 0.5, 0.8, 0.5, 0.8, 0.0, 0.0, 0.0, 0.0])
 
         # Test valid fire
         mock_simulator.active_units[mock_target.id] = mock_target

@@ -42,7 +42,7 @@ def candidate_campaign_model_roots() -> list[Path]:
             if sibling.exists() and sibling.resolve() not in resolved_roots:
                 roots.append(sibling)
                 resolved_roots.add(sibling.resolve())
-        except Exception:
+        except OSError:
             continue
     return [root for root in roots if root.exists()]
 

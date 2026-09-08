@@ -4,7 +4,7 @@
 
 checkpoint_path: null
 model_config_path: null
-train_config_path: configs/training/basic.yaml
+train_config_path: configs/training/large_map_heterogeneous.yaml
 env_type: bvr
 scenario: default
 
@@ -18,3 +18,6 @@ visualization:
   dpi: 150             # Reduced for faster rendering
   symbol_scale: 2.0
   show_text: true
+  labeling:
+    focus_unit_id: null       # Hovering or clicking an aircraft selects it
+    video_focus_rule: none

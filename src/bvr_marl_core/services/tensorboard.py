@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 from bvr_marl_core.utils.paths import core_project_root as project_root

@@ -8,13 +8,15 @@ Main exports:
 - ObservationBuilder: Main orchestrator (use this for backward compatibility)
 """
 
-from .builder import ObservationBuilder
-from .enemy_info_builder import EnemyInfoBuilder
-from .friendly_info_builder import FriendlyInfoBuilder
-from .missile_warning_builder import MissileWarningBuilder
-from .own_state_builder import OwnStateBuilder
-from .passive_radar_builder import PassiveRadarBuilder
-from .simplified_obs_builder import SimplifiedObservationBuilder
+_LAZY_EXPORTS = {
+    "ObservationBuilder": ".builder",
+    "EnemyInfoBuilder": ".enemy_info_builder",
+    "FriendlyInfoBuilder": ".friendly_info_builder",
+    "MissileWarningBuilder": ".missile_warning_builder",
+    "OwnStateBuilder": ".own_state_builder",
+    "PassiveRadarBuilder": ".passive_radar_builder",
+    "SimplifiedObservationBuilder": ".simplified_obs_builder",
+}
 
 __all__ = [
     "ObservationBuilder",
@@ -25,3 +27,15 @@ __all__ = [
     "PassiveRadarBuilder",
     "SimplifiedObservationBuilder",
 ]
+
+
+def __getattr__(name):
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from importlib import import_module
+
+    module = import_module(_LAZY_EXPORTS[name], __name__)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value

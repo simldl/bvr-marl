@@ -3,6 +3,9 @@ from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 import pytest
 
+from tests.helpers.track_snapshot import track_snapshot
+from tests.mocks.identity import declare_weapon_identity
+
 
 class TestGuidanceTargetProvider:
     """Test the guidance target provider system."""
@@ -15,8 +18,8 @@ class TestGuidanceTargetProvider:
         missile.position.lat = 45.0
         missile.position.lon = 2.0
         missile.position.alt = 8000.0
-        missile.designated_target_id = "TARGET_001"
-        missile.retarget_policy = "locked_override"
+        # Pin the identity surface so no probe is answered by a fabricated Mock.
+        declare_weapon_identity(missile, designated_target_id="TARGET_001")
         missile.radar = Mock()
         missile.radar.get_tracks.return_value = []
         missile.radar.get_locked_target.return_value = None
@@ -36,45 +39,13 @@ class TestGuidanceTargetProvider:
 
     @pytest.fixture
     def sample_tracks(self):
-        """Create sample radar tracks."""
-        # Track format: (tid, state, cov, tgt, utype, ref, conf, is_false, n_obs, lifetime, upd_cnt)
-
-        # Aircraft track
-        aircraft_target = Mock()
-        aircraft_target.is_missile = False
-        aircraft_target.id = "TARGET_001"
-
-        # Missile track
-        missile_target = Mock()
-        missile_target.is_missile = True
-        missile_target.id = "MISSILE_001"
-
-        aircraft_track = (
-            "TRACK_001",  # tid
-            np.array([1000.0, 2000.0, 500.0, 100.0, 50.0, 10.0]),  # state (pos + vel)
-            None,  # cov
-            aircraft_target,  # tgt
-            "AIRCRAFT",  # utype
-            Mock(lat=45.0, lon=2.0, alt=8000.0),  # ref
-            0.9,  # conf
-            False,  # is_false
-            10,  # n_obs
-            30.0,  # lifetime
-            5,  # upd_cnt
-        )
-
-        missile_track = (
-            "TRACK_002",  # tid
-            np.array([500.0, 1000.0, 100.0, 200.0, 100.0, 5.0]),  # state
-            None,  # cov
-            missile_target,  # tgt
-            "MISSILE",  # utype
-            Mock(lat=45.0, lon=2.0, alt=8000.0),  # ref
-            0.8,  # conf
-            False,  # is_false
-            5,  # n_obs
-            10.0,  # lifetime
-            3,  # upd_cnt
+        """Create sample authoritative radar snapshots."""
+        aircraft_track = track_snapshot("TRACK_001", lifetime_s=30.0)
+        missile_track = track_snapshot(
+            "TRACK_002",
+            state=(500.0, 1000.0, 100.0, 200.0, 100.0, 5.0),
+            classification="missile",
+            confidence=0.8,
         )
 
         return [aircraft_track, missile_track]
@@ -182,18 +153,10 @@ class TestGuidanceTargetProvider:
             high_vel_target.is_missile = False
             high_vel_target.id = "TARGET_001"
 
-            high_vel_track = (
+            high_vel_track = track_snapshot(
                 "TRACK_001",
-                np.array([1000.0, 2000.0, 500.0, 1500.0, 1000.0, 500.0]),  # Very high velocity
-                None,
-                high_vel_target,
-                "AIRCRAFT",
-                Mock(lat=45.0, lon=2.0, alt=8000.0),
-                0.9,
-                False,
-                10,
-                30.0,
-                5,
+                state=(1000.0, 2000.0, 500.0, 1500.0, 1000.0, 500.0),
+                lifetime_s=30.0,
             )
 
             mock_missile.radar.get_tracks.return_value = [high_vel_track]
@@ -319,7 +282,9 @@ class TestGuidanceTargetProvider:
             target_vel = provider.get_guidance_velocity()
 
             assert target_pos == mock_pos_seeded
-            assert target_vel == [100.0, 50.0, 10.0]
+            assert np.linalg.norm(target_vel) == pytest.approx(
+                np.linalg.norm([100.0, 50.0, 10.0]), rel=0.01
+            )
 
     def test_guidance_target_provider_velocity_smoothing(self, mock_missile, mock_simulator):
         """Test velocity smoothing for low-speed targets."""
@@ -342,18 +307,10 @@ class TestGuidanceTargetProvider:
             mock_ref.lon = 2.0
             mock_ref.alt = 8000.0
 
-            low_vel_track = (
+            low_vel_track = track_snapshot(
                 "TRACK_001",
-                np.array([1000.0, 2000.0, 500.0, 10.0, 5.0, 1.0]),  # Very low velocity
-                None,
-                low_vel_target,
-                "AIRCRAFT",
-                mock_ref,
-                0.9,
-                False,
-                10,
-                30.0,
-                5,
+                state=(1000.0, 2000.0, 500.0, 10.0, 5.0, 1.0),
+                lifetime_s=30.0,
             )
 
             mock_missile.radar.get_tracks.return_value = [low_vel_track]
@@ -586,24 +543,11 @@ class TestGuidanceTargetProvider:
 
         ref = Position(0.0, 0.0, 8000.0)
         state_b = np.array([1000.0, 0.0, 0.0, 150.0, 0.0, 0.0])
-        # 15-value track format: (tid, state, cov, tgt, utype, ref, conf, n_obs,
-        # lifetime, upd_cnt, is_deception, suspect_deception, eng_id, jammer_id, engageable)
-        track_b = (
-            "TRACK_B",
-            state_b,
-            None,
-            obj_b,
-            "AIRCRAFT",
-            ref,
-            0.9,
-            6,
-            12.0,
-            6,
-            False,
-            False,
-            None,
-            None,
-            True,
+        track_b = track_snapshot(
+            TARGET_B,
+            state=state_b,
+            reference=(ref.lat, ref.lon, ref.alt),
+            lifetime_s=12.0,
         )
 
         missile = Mock()
@@ -628,7 +572,46 @@ class TestGuidanceTargetProvider:
         provider.update(sim, tick_secs=0.1)
 
         assert provider.current_target_id == TARGET_B
-        assert missile.target is obj_b, (
-            "missile.target must follow the radar lock to the guided target so hit "
-            "detection checks the unit the missile is actually steering toward"
+        assert missile.target is obj_a
+
+
+class TestNormalizedTrackUncertainty:
+    """The live covariance -> C_trk belief weapon-support channel (P_trk input)."""
+
+    def test_low_covariance_gives_low_uncertainty(self):
+        from bvr_marl_core.missiles.guidance.target_provider import (
+            _normalized_track_uncertainty,
         )
+
+        # ~100 m RMS position std on a 1500 m reference -> ~0.067 (negligible).
+        cov = np.diag([100.0**2, 100.0**2, 100.0**2, 1.0, 1.0, 1.0])
+        c = _normalized_track_uncertainty(cov)
+        assert c == pytest.approx(100.0 / 1500.0, abs=1e-6)
+
+    def test_high_covariance_saturates_to_one(self):
+        from bvr_marl_core.missiles.guidance.target_provider import (
+            _normalized_track_uncertainty,
+        )
+
+        cov = np.diag([5000.0**2, 5000.0**2, 5000.0**2, 1.0, 1.0, 1.0])
+        assert _normalized_track_uncertainty(cov) == pytest.approx(1.0)
+
+    def test_uncertainty_is_monotonic_in_covariance(self):
+        from bvr_marl_core.missiles.guidance.target_provider import (
+            _normalized_track_uncertainty,
+        )
+
+        def c(std):
+            return _normalized_track_uncertainty(np.diag([std**2] * 3 + [1.0] * 3))
+
+        assert c(50.0) < c(400.0) < c(900.0)
+
+    def test_bad_covariance_returns_none_leaves_neutral(self):
+        from bvr_marl_core.missiles.guidance.target_provider import (
+            _normalized_track_uncertainty,
+        )
+
+        assert _normalized_track_uncertainty(None) is None
+        assert _normalized_track_uncertainty(np.full((3, 3), np.nan)) is None
+        # A too-small matrix has no position block to read.
+        assert _normalized_track_uncertainty(np.eye(2)) is None

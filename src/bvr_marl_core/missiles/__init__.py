@@ -1,11 +1,11 @@
 """Public missiles API for bvr_marl_core."""
 
-from .fox3.amraam import AIM120_AMRAAM
-from .fox3.default_missile import LongRangeMissile
-from .fox3.k77m import K77M
-from .fox3.meteor import Meteor
-from .missile import Missile
-from .missile_parameters import MissileParameters
+from bvr_marl_core.missiles.fox3.amraam import AIM120_AMRAAM
+from bvr_marl_core.missiles.fox3.default_missile import LongRangeMissile
+from bvr_marl_core.missiles.fox3.k77m import K77M
+from bvr_marl_core.missiles.fox3.meteor import Meteor
+from bvr_marl_core.missiles.missile import Missile
+from bvr_marl_core.missiles.missile_parameters import MissileParameters
 
 __all__ = [
     "Missile",

@@ -71,3 +71,25 @@ def test_episode_info_emits_team_b_fov_rate() -> None:
 
     assert info["team_a_fov_rate"] == 0.5
     assert info["team_b_fov_rate"] == 0.75
+
+
+def test_per_agent_means_without_raw_totals_do_not_crash_episode_end() -> None:
+    """Team size is back-solved from a mean only when the raw total is also present.
+
+    An info dict carrying ``*_mean_deaths_per_agent`` but no ``*_deaths`` used to
+    divide ``None`` by the mean, raising TypeError inside the RLlib episode-end
+    hook and taking down the callback mid-training.
+    """
+    info = {
+        "team_a_mean_kills_per_agent": 1.0,
+        "team_b_mean_kills_per_agent": 0.5,
+        "team_a_mean_deaths_per_agent": 0.5,
+        "team_b_mean_deaths_per_agent": 1.0,
+    }
+    logger = _MetricsLogger()
+
+    EpisodeMetricsCallback().on_episode_end(episode=_Episode(info), metrics_logger=logger)
+
+    # Falls back to a team size of 1 per side rather than raising.
+    assert logger.values["total_mean_kills_per_agent"] == 0.75
+    assert logger.values["total_mean_deaths_per_agent"] == 0.75

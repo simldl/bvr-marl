@@ -13,7 +13,6 @@ import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import psutil
 
@@ -115,7 +114,7 @@ class ProcessMonitor:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {str(k): v.to_dict() for k, v in records.items()}
             self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        except Exception:
+        except (OSError, TypeError, ValueError):
             pass  # non-fatal; GUI will show stale data
 
     # CRUD

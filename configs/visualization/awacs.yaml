@@ -1,17 +1,16 @@
-# Visualization Configuration – AWACS figure-8 scenario
+# Visualization Configuration – rear-area AWACS racetrack scenario
 # Load with:  python visualization/2d_live_view.py --viz_config visualization/configs/viz_config_awacs.yaml
 #
 # Uses random actions for fighters so no checkpoint is required.
-# Both teams have an AWACS flying a 25 km-radius NS figure-8 in the
-# 50 km side zones (blue/west and red/east), giving a total display
-# area of 300 km (EW) × 200 km (NS).
+# Both teams keep their AWACS in paired rear-area racetracks on the
+# 500 km evaluation map.
 
 # No trained model – fighters take random actions
 checkpoint_path: null
 model_config_path: null
 
 # Training config that has AWACS enabled
-train_config_path: configs/training/basic.yaml
+train_config_path: configs/training/large_map_heterogeneous.yaml
 
 # Environment type: "bvr" for full simulation with AWACS
 env_type: bvr

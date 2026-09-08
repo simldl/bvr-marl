@@ -1,14 +1,34 @@
-import matplotlib
-import numpy as np
-
-matplotlib.use("TkAgg")  # Force interactive backend for GUI display
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
+import numpy as np
 
 from bvr_marl_core.simulator import MapLimits
+from bvr_marl_core.visualization import can_show_matplotlib_window
+from bvr_marl_core.visualization.scenario_overlays import (
+    build_scenario_overlay_drawables,
+    build_scenario_status_lines,
+    select_display_limits,
+)
+from bvr_marl_core.visualization.scenplotter import (
+    AWACS,
+    Airplane,
+    Arc,
+    MapLabel,
+    PlotConfig,
+    PolyLine,
+    RadarCone,
+    ScaleBar,
+    ScenarioPlotter,
+    StatusMessage,
+    TopLeftMessage,
+)
+from bvr_marl_core.visualization.scenplotter import (
+    Missile as DrawableMissile,
+)
+from bvr_marl_core.visualization.scenplotter.label_manager import FighterLabelManager
 
 
 @runtime_checkable
@@ -30,25 +50,6 @@ class SimulationEnv(Protocol):
     def reset(self) -> tuple: ...
     def step(self, actions: dict) -> tuple: ...
 
-
-from bvr_marl_core.visualization.scenplotter import (  # noqa: E402, I001
-    AWACS,
-    Airplane,
-    Arc,
-    Missile as DrawableMissile,
-    PlotConfig,
-    PolyLine,
-    RadarCone,
-    ScaleBar,
-    ScenarioPlotter,
-    StatusMessage,
-    TopLeftMessage,
-)
-from bvr_marl_core.visualization.scenario_overlays import (  # noqa: E402
-    build_scenario_overlay_drawables,
-    build_scenario_status_lines,
-    select_display_limits,
-)
 
 AFFILIATION_COLORS = {
     "friendly": {"outline": (0.0, 0.4, 1.0, 1.0), "fill": (0.4, 0.6, 1.0, 1.0)},  # Blue
@@ -174,47 +175,15 @@ def plot_aircraft(
     trace_record: dict,
     show_trace: bool = True,
     action_state: dict = None,
+    label_priority: int = 0,
+    label_detail: str = "compact",
 ):
     """Returns drawable objects for an aircraft (including trace)."""
     affiliation = SIDE_AFFILIATION.get(side, "unknown")
     outline = AFFILIATION_COLORS[affiliation]["outline"]
     fill = AFFILIATION_COLORS[affiliation]["fill"]
 
-    altitude = unit.position.alt
-    info_lines = []
-
-    # Agent identifier
-    if action_state and "agent_name" in action_state:
-        info_lines.append(action_state["agent_name"])
-
-    # Aircraft type designator
-    info_lines.append(_AIRCRAFT_DISPLAY_NAMES.get(type(unit).__name__, type(unit).__name__))
-
-    # Altitude and Mach
-    info_lines.append(f"ALT: {altitude:0.0f} m")
-    info_lines.append(f"M: {unit.speed / 343:.2f}")
-
-    # Missile type and remaining count
-    missile_types = getattr(unit, "missile_types", [])
-    if missile_types:
-        missile_cls = missile_types[0]
-        missile_name = _MISSILE_DISPLAY_NAMES.get(missile_cls.__name__, missile_cls.__name__)
-        remaining = getattr(unit, "remaining_missiles", 0)
-        if hasattr(unit, "weapons"):
-            remaining = getattr(unit.weapons, "remaining_missiles", remaining)
-        info_lines.append(f"{missile_name} x {remaining}")
-
-    # Visible opponent count
-    visible_count = 0
-    if hasattr(unit, "sensor") and unit.sensor and hasattr(unit.sensor, "sensor_tracks"):
-        for track_data in unit.sensor.sensor_tracks:
-            if len(track_data) > 3 and track_data[3] is not None:
-                target = track_data[3]
-                if hasattr(target, "group") and target.group != unit.group:
-                    visible_count += 1
-    info_lines.append(f"TGTs: {visible_count}")
-
-    info_text = "\n".join(info_lines)
+    info_text = _aircraft_label_text(unit, action_state, detail=label_detail)
 
     # Choose sprite based on aircraft type
     is_awacs = getattr(unit, "is_support_asset", False)
@@ -226,7 +195,7 @@ def plot_aircraft(
             yaw_deg=unit.yaw_deg,
             edge_color=outline,
             fill_color=fill,
-            info_text=info_text,
+            info_text=None,
             zorder=10,
             affiliation=affiliation,
             aircraft_type=aircraft_type,
@@ -238,13 +207,24 @@ def plot_aircraft(
             yaw_deg=unit.yaw_deg,
             edge_color=outline,
             fill_color=fill,
-            info_text=info_text,
+            info_text=None,
             zorder=10,
             affiliation=affiliation,
             aircraft_type=aircraft_type,
         )
 
-    drawables = [sprite]
+    drawables = [
+        sprite,
+        MapLabel(
+            lat=unit.position.lat,
+            lon=unit.position.lon,
+            text=info_text,
+            unit_id=unit.id,
+            priority=label_priority,
+            affiliation=affiliation,
+            cluster_name=_AIRCRAFT_DISPLAY_NAMES.get(type(unit).__name__, type(unit).__name__),
+        ),
+    ]
 
     if show_trace and unit.id in trace_record:
         trace = [(pos.lat, pos.lon) for _, pos, _, _ in trace_record[unit.id]]
@@ -258,6 +238,70 @@ def plot_aircraft(
             )
         )
     return drawables
+
+
+def _aircraft_label_text(unit, action_state: dict | None, *, detail: str) -> str:
+    """Build compact map text or the selected-unit detail label."""
+    identity = (
+        str(action_state["agent_name"])
+        if action_state and action_state.get("agent_name")
+        else str(getattr(unit, "id", type(unit).__name__))
+    )
+    aircraft = _AIRCRAFT_DISPLAY_NAMES.get(type(unit).__name__, type(unit).__name__)
+    altitude = float(unit.position.alt)
+    mach = float(unit.speed) / 343.0
+    if detail == "short":
+        return f"{identity} · {aircraft}"
+    if detail != "full":
+        return f"{identity} · {aircraft}\n{altitude / 1000:.1f} km · M{mach:.2f}"
+
+    remaining = getattr(unit, "remaining_missiles", 0)
+    if hasattr(unit, "weapons"):
+        remaining = getattr(unit.weapons, "remaining_missiles", remaining)
+    tracks = _visible_track_count(unit)
+    fuel = getattr(unit, "fuel", None)
+    fuel_text = f" · fuel {float(fuel):.0f}" if isinstance(fuel, (int, float)) else ""
+    return (
+        f"{identity} · {aircraft}\n"
+        f"ALT {altitude / 1000:.1f} km · M{mach:.2f}{fuel_text}\n"
+        f"MSL {remaining} · tracks {tracks}"
+    )
+
+
+def _visible_track_count(unit) -> int:
+    sensor = getattr(unit, "sensor", None)
+    tracks = getattr(sensor, "sensor_tracks", ()) if sensor is not None else ()
+    return sum(
+        1
+        for track in tracks
+        if getattr(track, "engageable", False) and not getattr(track, "suspect_deception", False)
+    )
+
+
+def _deterministic_focus(active_units, rule: str) -> object | None:
+    """Resolve a non-interactive focus id for saved video rendering."""
+    aircraft = sorted(
+        (unit for unit in active_units if getattr(unit, "unit_kind", None) == "aircraft"),
+        key=lambda unit: str(unit.id),
+    )
+    if not aircraft or rule == "none":
+        return None
+    if rule == "first":
+        return aircraft[0].id
+    if rule == "nearest_threat":
+        candidates = []
+        aircraft_ids = {unit.id for unit in aircraft}
+        for missile in active_units:
+            if getattr(missile, "unit_kind", None) != "missile":
+                continue
+            target = getattr(missile, "target", None)
+            if target is None or getattr(target, "id", None) not in aircraft_ids:
+                continue
+            dx = float(missile.position.lon) - float(target.position.lon)
+            dy = float(missile.position.lat) - float(target.position.lat)
+            candidates.append((dx * dx + dy * dy, str(target.id), target.id))
+        return min(candidates)[2] if candidates else aircraft[0].id
+    raise ValueError("video_focus_rule must be one of: none, first, nearest_threat")
 
 
 def plot_missile(unit, side: str, trace_record: dict, active_unit_ids: set | None = None):
@@ -391,10 +435,10 @@ def _find_50pct_range_km(lut, max_range_m: float, rcs: float) -> float:
 def plot_radar_cone(unit, side: str, enemy_rcs: float | None = None):
     """Display radar cone based on the new radar class.
 
-    When *enemy_rcs* is provided the cone radius is shrunk to the 50 %
-    detection-probability range against that RCS value, and the fill opacity
-    is scaled by the detection probability at maximum designed range.  This
-    makes stealthy targets cause smaller, fainter cones.
+    The radius always represents the configured instrumented radar range.
+    When *enemy_rcs* is provided, detection probability affects opacity only;
+    changing the geometry to the least-observable opponent made the displayed
+    range misleadingly small (most visibly for the Su-57).
     """
     radar = getattr(unit, "radar", None)
     if radar is None:
@@ -405,28 +449,28 @@ def plot_radar_cone(unit, side: str, enemy_rcs: float | None = None):
 
     if is_support:
         # AWACS: distinct cyan/orange palette so cones don't blend with fighters.
-        # Display only the lock FOV cone, capped at 250 km.
+        # AWACS detection is omnidirectional. Keep 360 as an unnormalised end
+        # angle so Cairo draws a full circle rather than an empty path.
         color_table = SUPPORT_RADAR_COLORS
-        lock_fov = getattr(unit, "lock_fov_deg", 120.0)
-        delta = lock_fov / 2
+        angle1 = 0.0
+        angle2 = 360.0
         radius = min(radar.max_range_m / 1000.0, 250.0)
         fill_alpha = 0.15
     else:
         color_table = AFFILIATION_COLORS
         delta = radar.h_fov_deg / 2
+        radius = radar.max_range_m / 1000.0
         if enemy_rcs is not None:
-            radius = _find_50pct_range_km(radar.lut, radar.max_range_m, enemy_rcs)
             pd_at_max = radar.lut.get_probability(radar.max_range_m, enemy_rcs)
             fill_alpha = max(0.04, min(0.20, 0.20 * pd_at_max))
         else:
-            radius = radar.max_range_m / 1000.0
             fill_alpha = 0.15
+
+        angle1 = (unit.yaw_deg - delta + 360) % 360
+        angle2 = (unit.yaw_deg + delta) % 360
 
     outline = color_table[affiliation]["outline"]
     fill = color_table[affiliation]["fill"]
-
-    angle1 = (unit.yaw_deg - delta + 360) % 360
-    angle2 = (unit.yaw_deg + delta) % 360
 
     return [
         RadarCone(
@@ -482,7 +526,7 @@ def _try_create_symbol_registry(mode: str = "nato"):
         registry = SymbolRegistry(mode=mode)
         if registry.available_symbols():
             return registry
-    except Exception:
+    except (ImportError, AttributeError, TypeError):
         pass
     return None
 
@@ -503,8 +547,27 @@ def live_simulation(
     symbol_scale: float = 2.0,
     show_radar_cones: bool = True,
     show_text: bool = True,
+    focus_unit_id: str | None = None,
+    video_focus_rule: str = "none",
 ):
     """Runs a live simulation and displays/saves a video."""
+    render_offscreen = False
+    if not can_show_matplotlib_window(plt.get_backend()):
+        if not save_video:
+            raise RuntimeError(
+                "Live visualization requires an interactive Matplotlib backend and a display, "
+                f"but the active backend is {plt.get_backend()!r}. On desktop hosts, set "
+                "MPLBACKEND=TkAgg or install a GUI backend. On headless Linux, run under "
+                "X11/Wayland/Xvfb or pass --save-video to render off-screen."
+            )
+
+        print(
+            f"Matplotlib backend {plt.get_backend()!r} cannot open a live window; "
+            "rendering frames off-screen because --save-video is enabled."
+        )
+        plt.switch_backend("Agg")
+        render_offscreen = True
+
     observations, _ = env.reset()
 
     # Try to load symbols for the chosen mode
@@ -543,6 +606,24 @@ def live_simulation(
         np.zeros((plotter.img_height, plotter.img_width, 4), dtype=np.uint8),
         interpolation="none",
     )
+    # Aircraft are rendered into the Cairo frame, so this transparent collection
+    # supplies native Matplotlib hit testing without duplicating visible symbols.
+    hit_artist = ax.scatter([], [], s=900, facecolors="none", edgecolors="none", picker=True)
+    hit_unit_ids: list[object] = []
+    selected_unit_id: list[object | None] = [focus_unit_id]
+    label_manager = FighterLabelManager()
+
+    def _select_from_event(event) -> None:
+        if event.inaxes is not ax or not hit_unit_ids:
+            return
+        contains, details = hit_artist.contains(event)
+        indices = details.get("ind", ()) if contains else ()
+        if len(indices):
+            selected_unit_id[0] = hit_unit_ids[int(indices[0])]
+            fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("motion_notify_event", _select_from_event)
+    fig.canvas.mpl_connect("button_press_event", _select_from_event)
 
     previous_aircraft = {}
     status_message_queue = []
@@ -638,12 +719,38 @@ def live_simulation(
         )
         current_aircraft = {}
         unit_to_agent = {uid: aid for aid, uid in env.agent_to_unit_id.items()}
+        active_units = list(env.simulator.active_units.values())
+        active_aircraft_ids = {
+            unit.id for unit in active_units if getattr(unit, "unit_kind", None) == "aircraft"
+        }
+        configured_focus = next(
+            (
+                unit_id
+                for unit_id in active_aircraft_ids
+                if focus_unit_id is not None and str(unit_id) == str(focus_unit_id)
+            ),
+            None,
+        )
+        if save_video:
+            render_focus_id = configured_focus or _deterministic_focus(
+                active_units, video_focus_rule
+            )
+        else:
+            render_focus_id = selected_unit_id[0]
+            if render_focus_id not in active_aircraft_ids:
+                render_focus_id = configured_focus
+                selected_unit_id[0] = render_focus_id
+        threat_ids = {
+            getattr(getattr(unit, "target", None), "id", None)
+            for unit in active_units
+            if getattr(unit, "unit_kind", None) == "missile"
+        }
 
         # Pre-compute the minimum (most stealthy) enemy RCS for each side so
         # that each fighter's radar cone reflects its detection capability
         # against the hardest-to-find opponent.
         _enemy_min_rcs: dict[str, float | None] = {"blue": None, "red": None}
-        for _u in env.simulator.active_units.values():
+        for _u in active_units:
             if getattr(_u, "unit_kind", None) == "aircraft" and not getattr(
                 _u, "is_support_asset", False
             ):
@@ -654,23 +761,41 @@ def live_simulation(
                 if cur is None or _rcs < cur:
                     _enemy_min_rcs[_enemy_key] = _rcs
 
-        for unit in env.simulator.active_units.values():
+        map_labels = []
+        hit_positions = []
+        hit_ids = []
+        for unit in active_units:
             side = "blue" if unit.group == "agent" else "red"
             if getattr(unit, "unit_kind", None) == "aircraft":
                 # Build action state with agent name injected
                 unit_action_state = dict(action_states.get(unit.id, {}))
                 agent_id = unit_to_agent.get(unit.id, str(unit.id))
                 unit_action_state["agent_name"] = agent_id.upper()
-                drawables.extend(
-                    plot_aircraft(
-                        unit, side, env.simulator.trace_record_units, action_state=unit_action_state
-                    )
+                priority = 2 if unit.id == render_focus_id else (1 if unit.id in threat_ids else 0)
+                aircraft_drawables = plot_aircraft(
+                    unit,
+                    side,
+                    env.simulator.trace_record_units,
+                    action_state=unit_action_state,
+                    label_priority=priority,
+                    label_detail=(
+                        "full" if priority == 2 else ("short" if priority == 1 else "compact")
+                    ),
+                )
+                drawables.extend(aircraft_drawables)
+                map_labels.extend(
+                    drawable for drawable in aircraft_drawables if isinstance(drawable, MapLabel)
                 )
                 if show_radar_cones:
                     drawables.extend(
                         plot_radar_cone(unit, side, enemy_rcs=_enemy_min_rcs.get(side))
                     )
                 current_aircraft[unit.id] = True
+                px, py, _ = plotter._get_image_xya(
+                    unit.position.lat, unit.position.lon, unit.yaw_deg
+                )
+                hit_positions.append((px, plotter.img_height - py))
+                hit_ids.append(unit.id)
             elif getattr(unit, "unit_kind", None) == "missile":
                 drawables.extend(
                     plot_missile(
@@ -682,6 +807,33 @@ def live_simulation(
                 )
             elif getattr(unit, "is_countermeasure", False):
                 drawables.extend(plot_countermeasure(unit, side))
+
+        if show_text:
+            label_manager.layout(map_labels, plotter)
+        if render_focus_id in active_aircraft_ids:
+            focused = next(unit for unit in active_units if unit.id == render_focus_id)
+            side = "blue" if focused.group == "agent" else "red"
+            outline = AFFILIATION_COLORS[SIDE_AFFILIATION.get(side, "unknown")]["outline"]
+            drawables.append(
+                Arc(
+                    center_lat=focused.position.lat,
+                    center_lon=focused.position.lon,
+                    radius=max(2.0, plotter.cfg.symbol_size * 0.7 / plotter.pixels_km),
+                    angle1=0,
+                    angle2=360,
+                    edge_color=(1.0, 1.0, 1.0, 0.95),
+                    fill_color=(outline[0], outline[1], outline[2], 0.10),
+                    line_width=2.0,
+                    zorder=11,
+                )
+            )
+
+        hit_unit_ids[:] = hit_ids
+        hit_artist.set_offsets(
+            np.asarray(hit_positions, dtype=float)
+            if hit_positions
+            else np.empty((0, 2), dtype=float)
+        )
 
         # Messages for destroyed aircraft
         new_events = []
@@ -728,6 +880,20 @@ def live_simulation(
         status_lines.append(
             f"Red Team: {opponent_team_reward:+.1f} (step: {opponent_step_reward:+.1f})"
         )
+        if render_focus_id in active_aircraft_ids:
+            focused = next(unit for unit in active_units if unit.id == render_focus_id)
+            agent_id = unit_to_agent.get(focused.id, str(focused.id))
+            status_lines.extend(
+                [
+                    "",
+                    "FOCUS",
+                    *_aircraft_label_text(
+                        focused,
+                        {"agent_name": str(agent_id).upper()},
+                        detail="full",
+                    ).splitlines(),
+                ]
+            )
 
         drawables.append(TopLeftMessage("\n".join(status_lines), zorder=100))
         if env.simulator.status_text is not None:
@@ -759,7 +925,7 @@ def live_simulation(
             action_states.clear()
             cumulative_rewards = {agent_id: 0.0 for agent_id in env.agents}
             current_step_rewards.clear()
-        return (img,)
+        return img, hit_artist
 
     if save_video:
         video_output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -775,6 +941,15 @@ def live_simulation(
 
     # Live interactive view — frames are recorded and flushed at episode end
     # when save_video=True (see _flush_frame_buffer above).
+    if render_offscreen:
+        for frame_index in range(frames):
+            update_frame(frame_index)
+        if _frame_buffer:
+            print("Frame limit reached before episode end - saving partial video buffer.")
+            _flush_frame_buffer(video_output_file)
+        plt.close(fig)
+        return None
+
     anim = animation.FuncAnimation(fig, update_frame, frames=frames, interval=interval, blit=True)
     plt.show()
     return anim  # keep reference alive so GC doesn't destroy the animation

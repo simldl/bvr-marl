@@ -1,8 +1,13 @@
 """NEZ (no-escape zone) and DLZ (dynamic launch zone) visualisation.
 
-Top panel: DLZ band comparison (R1-R4) for AMRAAM and Meteor.
-Bottom panel: AMRAAM engagement ranges vs target aspect angle.
-Panels are stacked so each keeps the full single-column width.
+Top panel: R1-R4 zone bands for AMRAAM and Meteor at a stated reference
+geometry. Bottom panel: how the R_PI edge moves with target aspect and with
+altitude difference.
+
+Every edge is read from ``NoEscapeZoneCalculator.compute_dlz`` via
+``nez_probe``. The previous version of this figure computed the edges from its
+own fractions and drew the aspect dependence as a cosine, neither of which
+matched the model.
 """
 
 from __future__ import annotations
@@ -15,17 +20,23 @@ from matplotlib.patches import Patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nez_probe import amraam_params, dlz_at, meteor_params  # noqa: E402
 from paper_style import paper_figure, save_paper_figure  # noqa: E402
-from sqi_model import get_amraam_params, get_meteor_base_range_km  # noqa: E402
+
+# Reference geometry for the band comparison: co-altitude at 10 km, shooter at
+# 300 m/s, target closing head-on at 250 m/s.
+REF = dict(own_alt_m=10_000.0, own_speed_mps=300.0, tgt_alt_m=10_000.0, tgt_speed_mps=250.0)
 
 
-def _dlz_zones(min_range_km, base_range_km):
-    """Return (r_tr, r_pi, r_aero, r_max) using the nez.py:compute_dlz() formula."""
-    r_tr = min_range_km + 0.60 * (base_range_km - min_range_km)
-    r_pi = min_range_km + 0.88 * (base_range_km - min_range_km)
-    r_aero = min_range_km + 1.04 * (base_range_km - min_range_km)
-    r_max = base_range_km * 1.3
-    return r_tr, r_pi, r_aero, r_max
+def _edges_km(params):
+    d = dlz_at(params=params, tgt_yaw_deg=180.0, **REF)
+    return (
+        d.r_min_m / 1000.0,
+        d.r_nez_out_m / 1000.0,
+        d.r_tr_m / 1000.0,
+        d.r_pi_m / 1000.0,
+        d.r_aero_m / 1000.0,
+    )
 
 
 def _draw_dlz_bands(ax, amraam, meteor):
@@ -35,12 +46,12 @@ def _draw_dlz_bands(ax, amraam, meteor):
         ("AIM-120D AMRAAM", *amraam, ["#95E1D3", "#6DDF9B", "#38E19B", "#0BC965"]),
         ("Meteor", *meteor, ["#FFE66D", "#FFC700", "#FF9800", "#FF6B35"]),
     ]
-    for y_pos, (name, r_min, r_tr, r_pi, r_max, colors) in enumerate(missiles):
+    for y_pos, (name, r_min, r_tr, r_pi, r_aero, colors) in enumerate(missiles):
         segments = [
             (0, r_min, colors[0]),
             (r_min, r_tr - r_min, colors[1]),
             (r_tr, r_pi - r_tr, colors[2]),
-            (r_pi, r_max - r_pi, colors[3]),
+            (r_pi, r_aero - r_pi, colors[3]),
         ]
         for left, width, color in segments:
             ax.barh(
@@ -53,73 +64,103 @@ def _draw_dlz_bands(ax, amraam, meteor):
                 edgecolor="black",
                 linewidth=0.8,
             )
+        # R1 is ~1.5 km against a ~150 km axis; a label there would collide with
+        # the axis, so only segments wide enough to hold text are annotated.
         labels = [
-            (r_min / 2, "R1"),
-            ((r_min + r_tr) / 2, "R2\nNEZ"),
-            ((r_tr + r_pi) / 2, "R3\nopt."),
-            ((r_pi + r_max) / 2, "R4\next."),
+            (r_min, r_tr, "R2"),
+            (r_tr, r_pi, "R3"),
+            (r_pi, r_aero, "R4"),
         ]
-        for x, text in labels:
-            ax.text(x, y_pos, text, ha="center", va="center", fontsize=8, fontweight="bold")
+        for left, right, text in labels:
+            if (right - left) > 0.05 * r_aero:
+                ax.text(
+                    (left + right) / 2,
+                    y_pos,
+                    text,
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    fontweight="bold",
+                )
         ax.text(
-            0, y_pos + y_height + 0.12, name, ha="left", va="bottom", fontsize=8, fontweight="bold"
+            0,
+            y_pos + y_height / 2 + 0.06,
+            name,
+            ha="left",
+            va="bottom",
+            fontsize=8,
+            fontweight="bold",
         )
-        ax.text(r_max + 2, y_pos, f"{r_max:.0f} km", ha="left", va="center", fontsize=8)
+        ax.text(
+            r_aero + 3,
+            y_pos,
+            f"{r_aero:.0f} km",
+            ha="left",
+            va="center",
+            fontsize=8,
+            fontweight="bold",
+        )
 
 
 def create_nez_dlz_plot():
-    """Build the stacked NEZ/DLZ figure."""
-    amraam_base_km, amraam_min_km = get_amraam_params()
-    meteor_base_km = get_meteor_base_range_km()
-    meteor_min_km = 2.0
-
-    a_tr, a_pi, _, a_max = _dlz_zones(amraam_min_km, amraam_base_km)
-    m_tr, m_pi, _, m_max = _dlz_zones(meteor_min_km, meteor_base_km)
+    """Build the stacked NEZ/DLZ figure from the production zone model."""
+    amraam, meteor = amraam_params(), meteor_params()
+    a_min, _, a_tr, a_pi, a_aero = _edges_km(amraam)
+    m_min, _, m_tr, m_pi, m_aero = _edges_km(meteor)
 
     fig, (ax_top, ax_bot) = paper_figure(nrows=2, row_height_in=2.6)
 
-    _draw_dlz_bands(
-        ax_top,
-        (amraam_min_km, a_tr, a_pi, a_max),
-        (meteor_min_km, m_tr, m_pi, m_max),
-    )
-    ax_top.set_xlim(-15, 280)
-    ax_top.set_ylim(-0.5, 2.0)
+    _draw_dlz_bands(ax_top, (a_min, a_tr, a_pi, a_aero), (m_min, m_tr, m_pi, m_aero))
+    ax_top.set_xlim(-8, max(a_aero, m_aero) * 1.16)
+    # Headroom above the bars for the legend, so it never covers a range band.
+    ax_top.set_ylim(-0.45, 2.45)
     ax_top.set_xlabel("Slant range [km]")
-    ax_top.set_title("Fox-3 missile DLZ comparison")
+    ax_top.set_title("Fox-3 DLZ, head-on at 10 km / 300 m/s")
     ax_top.set_yticks([])
     ax_top.grid(axis="x", linestyle=":")
-    legend_elements = [
-        Patch(facecolor="#95E1D3", edgecolor="black", label="R1: too close"),
-        Patch(facecolor="#6DDF9B", edgecolor="black", label="R2: NEZ (best)"),
-        Patch(facecolor="#38E19B", edgecolor="black", label="R3: optimal"),
-        Patch(facecolor="#0BC965", edgecolor="black", label="R4: extended"),
-    ]
-    ax_top.legend(handles=legend_elements, loc="lower right", ncol=2)
-
-    aspect = np.linspace(0, 180, 100)
-    aspect_mod = np.cos(2 * np.radians(aspect - 90))
-    nez = a_tr + 8 * aspect_mod
-    r3 = a_pi + 12 * aspect_mod
-    r_max_aspect = a_max + 15 * aspect_mod
-    ax_bot.fill_between(aspect, 0, nez, alpha=0.3, color="green")
-    ax_bot.fill_between(aspect, nez, r3, alpha=0.2, color="yellow")
-    ax_bot.fill_between(aspect, r3, r_max_aspect, alpha=0.1, color="orange")
-    ax_bot.plot(aspect, nez, color="green", linewidth=1.4, label="NEZ boundary")
-    ax_bot.plot(aspect, r3, color="darkorange", linewidth=1.4, linestyle="--", label="R3 boundary")
-    ax_bot.plot(
-        aspect, r_max_aspect, color="darkred", linewidth=1.4, linestyle=":", label="Max range"
+    ax_top.legend(
+        handles=[
+            Patch(facecolor="#6DDF9B", edgecolor="black", label="R2: to $R_{TR}$"),
+            Patch(facecolor="#38E19B", edgecolor="black", label="R3: to $R_{PI}$"),
+            Patch(facecolor="#0BC965", edgecolor="black", label="R4: to $R_{Aero}$"),
+        ],
+        loc="upper center",
+        ncol=3,
+        fontsize=7,
+        handlelength=1.4,
+        columnspacing=1.0,
+        framealpha=0.9,
     )
-    for x, color in ((0, "blue"), (90, "darkgreen"), (180, "blue")):
-        ax_bot.axvline(x, color=color, linestyle=":", alpha=0.5, linewidth=1.0)
-    ax_bot.set_xlabel("Target aspect angle [deg]")
-    ax_bot.set_ylabel("Effective range [km]")
-    ax_bot.set_title(f"AMRAAM NEZ vs aspect ({amraam_base_km:.0f} km base)")
+
+    # Aspect sweep: target heading 180 deg closes head-on, 0 deg runs away.
+    aspect = np.linspace(0.0, 180.0, 61)
+    for delta_h_m, style, label in (
+        (3000.0, "-", r"$\Delta h = +3$ km"),
+        (0.0, "--", r"$\Delta h = 0$"),
+        (-3000.0, ":", r"$\Delta h = -3$ km"),
+    ):
+        r_pi = [
+            dlz_at(
+                params=amraam,
+                own_alt_m=10_000.0 + delta_h_m,
+                own_speed_mps=300.0,
+                tgt_alt_m=10_000.0,
+                tgt_speed_mps=250.0,
+                tgt_yaw_deg=float(a),
+            ).r_pi_m
+            / 1000.0
+            for a in aspect
+        ]
+        ax_bot.plot(aspect, r_pi, style, linewidth=1.4, label=label)
+
+    ax_bot.set_xlabel("Target heading [deg]  (0 = running, 180 = head-on)")
+    ax_bot.set_ylabel("$R_{PI}$ [km]")
+    ax_bot.set_title("AMRAAM $R_{PI}$ vs aspect and altitude difference")
     ax_bot.set_xlim(0, 180)
-    ax_bot.set_ylim(0, m_max * 1.05)
+    ax_bot.set_ylim(0, None)
     ax_bot.set_xticks([0, 45, 90, 135, 180])
     ax_bot.grid(True, linestyle=":")
-    ax_bot.legend(loc="upper right")
+    ax_bot.legend(loc="upper left")
     return fig
 
 

@@ -8,9 +8,9 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from paper_style import paper_figure, save_paper_figure  # noqa: E402
+from paper_style import paper_figure, save_paper_figure
 
-from bvr_marl_core.missiles.core.phases import MissilePhaseManager  # noqa: E402
+from bvr_marl_core.missiles.core.phases import MissilePhaseManager
 
 
 def plot_missile_thrust():

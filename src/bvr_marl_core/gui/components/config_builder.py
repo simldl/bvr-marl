@@ -5,16 +5,15 @@ Interface for creating, editing and tracking training configurations.
 Saves configurations to configs/training/ at the project root.
 """
 
-import json
-import os
 import re
 from copy import deepcopy
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
 import yaml
+
+from bvr_marl_core.gui.components.config_diff import collect_config_differences
 
 _LEGACY_REWARD_CATEGORY_MAP = {
     "enable_terminal": "terminal",
@@ -547,14 +546,88 @@ def _ensure_env_defaults(config: dict[str, Any]):
     env.setdefault("max_steps", 1024)
 
 
+# --- Pure helpers for the opt-in scenario-variety options (heterogeneous types,
+# spawn variation). Kept free of Streamlit so they can be unit-tested. ---
+
+AIRCRAFT_TYPES = ["Eurofighter", "F22", "F35", "Su57", "AWACS", "DebugPlane"]
+
+SPAWN_VARIATION_KEYS = ("spawn_speed_min", "spawn_speed_max", "spawn_alt_min", "spawn_alt_max")
+
+
+def collapse_type_selection(slot_types: list[str]) -> "str | list[str] | None":
+    """Collapse a per-slot list of aircraft-type strings into a config value.
+
+    A team flying a single type collapses to that plain string (the common
+    case); a genuinely mixed formation stays a list, which the environment
+    assigns per slot and cycles.
+    """
+    types = [t for t in (slot_types or []) if t]
+    if not types:
+        return None
+    if all(t == types[0] for t in types):
+        return types[0]
+    return list(types)
+
+
+def expand_type_selection(value: "str | list[str] | None", count: int) -> list[str]:
+    """Expand a config aircraft-type value into exactly ``count`` per-slot strings.
+
+    A list is cycled; a single string is repeated. Used to pre-fill the per-slot
+    selectors from whatever the loaded config holds.
+    """
+    if isinstance(value, (list, tuple)):
+        base = [t for t in value if t] or [AIRCRAFT_TYPES[0]]
+    else:
+        base = [value or AIRCRAFT_TYPES[0]]
+    return [base[i % len(base)] for i in range(max(0, count))]
+
+
+def spawn_variation_enabled(env: dict[str, Any]) -> bool:
+    """True iff the env config carries a complete spawn-variation range."""
+    return all(env.get(k) is not None for k in SPAWN_VARIATION_KEYS)
+
+
+def write_spawn_variation(
+    env: dict[str, Any],
+    enabled: bool,
+    speed_min: float,
+    speed_max: float,
+    alt_min: float,
+    alt_max: float,
+) -> dict[str, Any]:
+    """Set (when enabled) or clear the opt-in spawn-variation keys on the env.
+
+    Clearing them restores the fixed-start behaviour, so a disabled toggle leaves
+    no stray keys in the saved config.
+    """
+    if enabled:
+        env["spawn_speed_min"] = float(speed_min)
+        env["spawn_speed_max"] = float(speed_max)
+        env["spawn_alt_min"] = float(alt_min)
+        env["spawn_alt_max"] = float(alt_max)
+    else:
+        for k in SPAWN_VARIATION_KEYS:
+            env.pop(k, None)
+    return env
+
+
 def render_general_settings():
     """Render general environment settings page."""
     st.subheader("General Environment Settings")
 
     config = st.session_state.current_config
     _ensure_env_defaults(config)
+    env_type = _render_environment_type_selection(config)
+    _render_team_configuration(config)
+    _render_aircraft_configuration(config)
+    _render_missile_configuration(config)
+    _render_spawn_variation(config)
+    if env_type != "Simplified":
+        _render_awacs_configuration(config)
+    _render_boundary_configuration(config)
 
-    # Environment Type Selection
+
+def _render_environment_type_selection(config: dict[str, Any]) -> str:
     st.markdown("### Environment Type")
     environment_types = ["Standard BVR", "Simplified"]
     env_type = st.radio(
@@ -565,12 +638,9 @@ def render_general_settings():
         ),
         help="Standard: Full BVR with radar, AWACS, etc. Simplified: Truth observations, reduced action space.",
     )
-    # Persist so render_network_settings can read it
     st.session_state["training_env_type"] = env_type
     config["training_mode"] = "simplified" if env_type == "Simplified" else "bvr"
 
-    # Eagerly fix model config when Simplified is selected so that saving
-    # without ever visiting the Networks tab still produces a valid config.
     if env_type == "Simplified":
         config.setdefault("model", {}).setdefault("model_config", {})
         config["model"]["use_neural_wrapper"] = False
@@ -579,25 +649,41 @@ def render_general_settings():
         config["model"]["model_config"]["full_action_dim"] = 4
         config["model"]["model_config"]["active_indices"] = [0, 1, 2, 3]
 
-    # Team Configuration
+    return env_type
+
+
+def _render_team_configuration(config: dict[str, Any]) -> None:
     st.markdown("### Team Configuration")
     col1, col2 = st.columns(2)
 
     with col1:
-        config["env"]["num_agents_per_side"] = st.number_input(
-            "Agents per Side:",
+        n_agents = st.number_input(
+            "Agents per Side (Blue):",
             min_value=1,
             max_value=8,
             value=config["env"].get("num_agents_per_side", 2),
-            help="Number of agents on each team",
+            help="Number of agents on the blue team",
+        )
+        config["env"]["num_agents_per_side"] = n_agents
+
+        # Asymmetric scenarios: the opponent (red) count may differ from blue.
+        # Defaults to the blue count, recovering the symmetric case.
+        config["env"]["num_opponents"] = st.number_input(
+            "Opponents per Side (Red):",
+            min_value=1,
+            max_value=8,
+            value=int(config["env"].get("num_opponents", n_agents)),
+            help="Number of opponents on the red team. Set different from blue for "
+            "asymmetric scenarios (e.g. 4 vs 3).",
         )
 
         config["env"]["map_size"] = st.number_input(
             "Map Size (km):",
             min_value=50,
-            max_value=500,
+            max_value=1000,
             value=config["env"].get("map_size", 200),
-            help="Size of the battle area",
+            help="Size of the (square) battle area. Long-range sensors/missiles reach "
+            "150-250 km, so a large theatre (e.g. 500 km) keeps their envelopes relevant.",
         )
 
     with col2:
@@ -617,30 +703,118 @@ def render_general_settings():
             help="Time per simulation step",
         )
 
-    # Aircraft Configuration
+
+def _render_aircraft_configuration(config: dict[str, Any]) -> None:
     st.markdown("### Aircraft Configuration")
-    aircraft_types = ["Eurofighter", "F22", "F35", "Su57", "AWACS", "DebugPlane"]
+    aircraft_types = AIRCRAFT_TYPES
+    ac = config["env"]["aircraft_config"]
+
+    agent_val = ac.get("agent_type", "Eurofighter")
+    opp_val = ac.get("opponent_type", "Eurofighter")
+
+    # Heterogeneous formations are opt-in: when off, one type flies the whole
+    # team (a plain string); when on, each slot picks its own type (a list that
+    # the env assigns per slot and cycles).
+    heterogeneous = st.checkbox(
+        "Heterogeneous formations (per-slot aircraft types)",
+        value=isinstance(agent_val, (list, tuple)) or isinstance(opp_val, (list, tuple)),
+        help="Assign a different aircraft type to each slot, e.g. an F-22 leading F-35s.",
+    )
+
+    n_agents = int(config["env"].get("num_agents_per_side", 2))
+    n_opp = int(config["env"].get("num_opponents", n_agents))
+
+    if not heterogeneous:
+        col1, col2 = st.columns(2)
+        with col1:
+            single = expand_type_selection(agent_val, 1)[0]
+            ac["agent_type"] = st.selectbox(
+                "Agent Aircraft:", aircraft_types, index=aircraft_types.index(single)
+            )
+        with col2:
+            single = expand_type_selection(opp_val, 1)[0]
+            ac["opponent_type"] = st.selectbox(
+                "Opponent Aircraft:", aircraft_types, index=aircraft_types.index(single)
+            )
+        return
 
     col1, col2 = st.columns(2)
     with col1:
-        config["env"]["aircraft_config"]["agent_type"] = st.selectbox(
-            "Agent Aircraft:",
-            aircraft_types,
-            index=aircraft_types.index(
-                config["env"]["aircraft_config"].get("agent_type", "Eurofighter")
-            ),
-        )
-
+        st.caption(f"Blue formation ({n_agents} ship)")
+        agent_slots = []
+        for i, cur in enumerate(expand_type_selection(agent_val, n_agents)):
+            agent_slots.append(
+                st.selectbox(
+                    f"Blue slot {i}:",
+                    aircraft_types,
+                    index=aircraft_types.index(cur),
+                    key=f"agent_slot_type_{i}",
+                )
+            )
+        ac["agent_type"] = collapse_type_selection(agent_slots)
     with col2:
-        config["env"]["aircraft_config"]["opponent_type"] = st.selectbox(
-            "Opponent Aircraft:",
-            aircraft_types,
-            index=aircraft_types.index(
-                config["env"]["aircraft_config"].get("opponent_type", "Eurofighter")
-            ),
-        )
+        st.caption(f"Red formation ({n_opp} ship)")
+        opp_slots = []
+        for i, cur in enumerate(expand_type_selection(opp_val, n_opp)):
+            opp_slots.append(
+                st.selectbox(
+                    f"Red slot {i}:",
+                    aircraft_types,
+                    index=aircraft_types.index(cur),
+                    key=f"opponent_slot_type_{i}",
+                )
+            )
+        ac["opponent_type"] = collapse_type_selection(opp_slots)
 
-    # Missile Configuration
+
+def _render_spawn_variation(config: dict[str, Any]) -> None:
+    st.markdown("### Spawn Start-State Variation")
+    env = config["env"]
+    enabled = st.checkbox(
+        "Randomize start speed & altitude per episode",
+        value=spawn_variation_enabled(env),
+        help="Opt-in. When off, each aircraft uses the fixed start from the chosen "
+        "geometry. When on, start speed and altitude are drawn uniformly from the "
+        "ranges below, exposing the policy to varied entry energies and stack heights.",
+    )
+    if not enabled:
+        write_spawn_variation(env, False, 0, 0, 0, 0)
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        speed_min = st.number_input(
+            "Start speed min (m/s):",
+            min_value=50.0,
+            max_value=600.0,
+            value=float(env.get("spawn_speed_min", 200.0)),
+        )
+        alt_min = st.number_input(
+            "Start altitude min (m):",
+            min_value=100.0,
+            max_value=20000.0,
+            value=float(env.get("spawn_alt_min", 6000.0)),
+        )
+    with col2:
+        speed_max = st.number_input(
+            "Start speed max (m/s):",
+            min_value=50.0,
+            max_value=600.0,
+            value=float(env.get("spawn_speed_max", 300.0)),
+        )
+        alt_max = st.number_input(
+            "Start altitude max (m):",
+            min_value=100.0,
+            max_value=20000.0,
+            value=float(env.get("spawn_alt_max", 11000.0)),
+        )
+    # Guard against inverted ranges before writing.
+    speed_max = max(speed_max, speed_min)
+    alt_max = max(alt_max, alt_min)
+    write_spawn_variation(env, True, speed_min, speed_max, alt_min, alt_max)
+
+
+def _render_missile_configuration(config: dict[str, Any]) -> None:
     st.markdown("### Missile Configuration")
     missile_types = ["AIM120_AMRAAM", "Meteor", "K77M", "DefaultMissile"]
 
@@ -665,44 +839,43 @@ def render_general_settings():
         help="Number of missiles each agent carries at the start of the episode.",
     )
 
-    # AWACS Configuration (BVR only; Simplified env has no AWACS)
-    if env_type != "Simplified":
-        st.markdown("### AWACS Configuration")
-        col1, col2 = st.columns(2)
 
-        with col1:
-            config["env"]["scenario_config"]["awacs_config"]["agent_awacs"] = st.checkbox(
-                "Blue Team AWACS",
-                value=config["env"]["scenario_config"]["awacs_config"].get("agent_awacs", True),
-            )
+def _render_awacs_configuration(config: dict[str, Any]) -> None:
+    st.markdown("### AWACS Configuration")
+    col1, col2 = st.columns(2)
 
-            config["env"]["scenario_config"]["awacs_config"]["opponent_awacs"] = st.checkbox(
-                "Red Team AWACS",
-                value=config["env"]["scenario_config"]["awacs_config"].get("opponent_awacs", True),
-            )
+    with col1:
+        config["env"]["scenario_config"]["awacs_config"]["agent_awacs"] = st.checkbox(
+            "Blue Team AWACS",
+            value=config["env"]["scenario_config"]["awacs_config"].get("agent_awacs", True),
+        )
 
-        with col2:
-            config["env"]["scenario_config"]["awacs_config"]["orbit_altitude_m"] = st.number_input(
-                "AWACS Altitude (m):",
-                min_value=5000,
-                max_value=20000,
-                value=int(
-                    config["env"]["scenario_config"]["awacs_config"].get("orbit_altitude_m", 10000)
-                ),
-            )
+        config["env"]["scenario_config"]["awacs_config"]["opponent_awacs"] = st.checkbox(
+            "Red Team AWACS",
+            value=config["env"]["scenario_config"]["awacs_config"].get("opponent_awacs", True),
+        )
 
-            config["env"]["scenario_config"]["awacs_config"]["awacs_non_engageable"] = st.checkbox(
-                "AWACS Non-Engageable",
-                value=config["env"]["scenario_config"]["awacs_config"].get(
-                    "awacs_non_engageable", True
-                ),
-                help="AWACS cannot be targeted or destroyed",
-            )
+    with col2:
+        config["env"]["scenario_config"]["awacs_config"]["orbit_altitude_m"] = st.number_input(
+            "AWACS Altitude (m):",
+            min_value=5000,
+            max_value=20000,
+            value=int(
+                config["env"]["scenario_config"]["awacs_config"].get("orbit_altitude_m", 10000)
+            ),
+        )
 
-    # Boundary Configuration
+        config["env"]["scenario_config"]["awacs_config"]["awacs_non_engageable"] = st.checkbox(
+            "AWACS Non-Engageable",
+            value=config["env"]["scenario_config"]["awacs_config"].get(
+                "awacs_non_engageable", True
+            ),
+            help="AWACS cannot be targeted or destroyed",
+        )
+
+
+def _render_boundary_configuration(config: dict[str, Any]) -> None:
     st.markdown("### Boundary & Termination")
-
-    # Add a boundary section
     if "boundary_config" not in config["env"]:
         config["env"]["boundary_config"] = {
             "enable_boundary": True,
@@ -720,7 +893,7 @@ def render_general_settings():
         config["env"]["boundary_config"]["boundary_size_km"] = st.number_input(
             "Boundary Size (km):",
             min_value=50,
-            max_value=500,
+            max_value=1000,
             value=config["env"]["boundary_config"].get(
                 "boundary_size_km", config["env"].get("map_size", 200)
             ),
@@ -733,8 +906,14 @@ def render_training_settings():
     st.subheader("Training Hyperparameters")
 
     config = st.session_state.current_config
+    _migrate_training_setting_keys(config)
+    _render_training_resources(config)
+    _render_learning_parameters(config)
+    _render_gae_settings(config)
+    _render_multi_agent_policy_settings(config)
 
-    # Migrate old key names from configs saved before the rename
+
+def _migrate_training_setting_keys(config: dict[str, Any]) -> None:
     training = config["training"]
     if "batch_size" in training and "train_batch_size" not in training:
         training["train_batch_size"] = training.pop("batch_size")
@@ -743,7 +922,8 @@ def render_training_settings():
     if "rollout_fragment_length" in training and "rollout_fragment_length" not in config:
         config["rollout_fragment_length"] = training.pop("rollout_fragment_length")
 
-    # Training Steps and Resources
+
+def _render_training_resources(config: dict[str, Any]) -> None:
     st.markdown("### Training Configuration")
     col1, col2 = st.columns(2)
 
@@ -816,7 +996,8 @@ def render_training_settings():
             ),
         )
 
-    # Learning Parameters
+
+def _render_learning_parameters(config: dict[str, Any]) -> None:
     st.markdown("### Learning Parameters")
     col1, col2 = st.columns(2)
 
@@ -893,7 +1074,8 @@ def render_training_settings():
         if config["training"]["grad_clip"] == 0.0:
             config["training"]["grad_clip"] = None
 
-    # GAE Configuration
+
+def _render_gae_settings(config: dict[str, Any]) -> None:
     st.markdown("### Generalized Advantage Estimation (GAE)")
     col1, col2 = st.columns(2)
 
@@ -914,6 +1096,8 @@ def render_training_settings():
                 help="GAE lambda parameter",
             )
 
+
+def _render_multi_agent_policy_settings(config: dict[str, Any]) -> None:
     st.markdown("### Multi-Agent Policies")
     ma_cfg = config["training"].setdefault(
         "multi_agent",
@@ -1095,7 +1279,27 @@ def render_rewards_settings():
     migrate_reward_schema(config, warn=True)
     reward_config = reward_view_from_config(config)
 
-    # Reward Categories
+    _render_reward_category_toggles(reward_config)
+    write_reward_view_to_config(config, reward_config)
+
+    if reward_config["enable_line_objective"]:
+        _render_line_objective_settings(config)
+    if reward_config["enable_terminal"]:
+        _render_terminal_reward_settings(reward_config)
+    if reward_config["enable_tactical"]:
+        _render_tactical_reward_settings(reward_config)
+    if reward_config["enable_energy"]:
+        _render_energy_reward_settings(reward_config)
+    if reward_config["enable_control"]:
+        _render_control_reward_settings(reward_config)
+    if reward_config["enable_defensive"]:
+        _render_defensive_reward_settings(reward_config)
+
+    _render_reward_normalization_settings(config)
+    write_reward_view_to_config(config, reward_config)
+
+
+def _render_reward_category_toggles(reward_config: dict[str, Any]) -> None:
     st.markdown("### Reward Categories")
     st.info("""
     The reward system is divided into categories that can be enabled/disabled:
@@ -1146,363 +1350,363 @@ def render_rewards_settings():
             help="Rewards attackers for penetration and defenders for denial",
         )
 
-    write_reward_view_to_config(config, reward_config)
 
-    # Line Objective Rewards
-    if reward_config["enable_line_objective"]:
-        st.markdown("### Line Objective / Penetration Scenario")
-        env = config.setdefault("env", {})
-        scenario_cfg = env.setdefault("scenario_config", {})
-        line_cfg = scenario_cfg.setdefault("line_objective", deepcopy(_LINE_OBJECTIVE_DEFAULTS))
+def _render_line_objective_settings(config: dict[str, Any]) -> None:
+    st.markdown("### Line Objective / Penetration Scenario")
+    env = config.setdefault("env", {})
+    scenario_cfg = env.setdefault("scenario_config", {})
+    line_cfg = scenario_cfg.setdefault("line_objective", deepcopy(_LINE_OBJECTIVE_DEFAULTS))
 
-        col1, col2 = st.columns(2)
-        with col1:
-            line_cfg["enabled"] = st.checkbox(
-                "Line Objective Active",
-                value=bool(line_cfg.get("enabled", True)),
-            )
-            line_cfg["attacker_team"] = st.selectbox(
-                "Attacker Team:",
-                ["A", "B"],
-                index=0 if line_cfg.get("attacker_team", "A") == "A" else 1,
-            )
-            defender_default = "B" if line_cfg["attacker_team"] == "A" else "A"
-            line_cfg["defender_team"] = st.selectbox(
-                "Defender Team:",
-                ["A", "B"],
-                index=0 if line_cfg.get("defender_team", defender_default) == "A" else 1,
-            )
-            line_cfg["penetration_line_north_m"] = st.number_input(
-                "Penetration Line North (m):",
-                min_value=-500000.0,
-                max_value=500000.0,
-                value=float(line_cfg.get("penetration_line_north_m", 100000.0)),
-            )
-            axis_deg = st.number_input(
-                "Penetration Axis (deg):",
-                min_value=-180.0,
-                max_value=180.0,
-                value=float(line_cfg.get("penetration_axis_rad", 0.0)) * 180.0 / 3.141592653589793,
-            )
-            line_cfg["penetration_axis_rad"] = axis_deg * 3.141592653589793 / 180.0
-        with col2:
-            line_cfg["attacker_crossing_bonus"] = st.number_input(
-                "Attacker Crossing Bonus:",
-                min_value=0.0,
-                max_value=1000.0,
-                value=float(line_cfg.get("attacker_crossing_bonus", 80.0)),
-            )
-            line_cfg["attacker_team_crossing_bonus"] = st.number_input(
-                "Attacker Team Crossing Bonus:",
-                min_value=0.0,
-                max_value=1000.0,
-                value=float(line_cfg.get("attacker_team_crossing_bonus", 120.0)),
-            )
-            line_cfg["attacker_progress_scale"] = st.number_input(
-                "Attacker Progress Scale:",
-                min_value=0.0,
-                max_value=1000.0,
-                value=float(line_cfg.get("attacker_progress_scale", 20.0)),
-            )
-            line_cfg["attacker_failure_penalty"] = st.number_input(
-                "Attacker Failure Penalty:",
-                min_value=-1000.0,
-                max_value=0.0,
-                value=float(line_cfg.get("attacker_failure_penalty", -80.0)),
-            )
-            line_cfg["attacker_stagnation_penalty"] = st.number_input(
-                "Attacker Stagnation Penalty:",
-                min_value=-1000.0,
-                max_value=0.0,
-                value=float(line_cfg.get("attacker_stagnation_penalty", -0.01)),
-            )
-            line_cfg["defender_hold_reward"] = st.number_input(
-                "Defender Hold Reward:",
-                min_value=0.0,
-                max_value=10.0,
-                value=float(line_cfg.get("defender_hold_reward", 0.05)),
-            )
-            line_cfg["defender_penetration_penalty"] = st.number_input(
-                "Defender Penetration Penalty:",
-                min_value=-1000.0,
-                max_value=0.0,
-                value=float(line_cfg.get("defender_penetration_penalty", -120.0)),
-            )
-            line_cfg["defender_terminal_success_reward"] = st.number_input(
-                "Defender Terminal Success Reward:",
-                min_value=0.0,
-                max_value=1000.0,
-                value=float(line_cfg.get("defender_terminal_success_reward", 80.0)),
-            )
-            line_cfg["crossing_buffer_m"] = st.number_input(
-                "Crossing Buffer (m):",
-                min_value=0.0,
-                max_value=50000.0,
-                value=float(line_cfg.get("crossing_buffer_m", 2000.0)),
-            )
-            line_cfg["count_crossing_once"] = st.checkbox(
-                "Count Crossing Once",
-                value=bool(line_cfg.get("count_crossing_once", True)),
-            )
-            line_cfg["attacker_success_requires_crossing"] = st.checkbox(
-                "Attacker Success Requires Crossing",
-                value=bool(line_cfg.get("attacker_success_requires_crossing", True)),
-            )
-            line_cfg["defender_destroyed_counts_as_attacker_success"] = st.checkbox(
-                "Defender Destroyed Counts as Attacker Success",
-                value=bool(line_cfg.get("defender_destroyed_counts_as_attacker_success", False)),
-            )
-            line_cfg["defender_no_cross_enabled"] = st.checkbox(
-                "Defender No-Cross Penalty Enabled",
-                value=bool(line_cfg.get("defender_no_cross_enabled", True)),
-            )
-            line_cfg["defender_crossing_penalty"] = st.number_input(
-                "Defender Crossing Penalty:",
-                min_value=-1000.0,
-                max_value=0.0,
-                value=float(line_cfg.get("defender_crossing_penalty", -20.0)),
-            )
-            line_cfg["defender_allowed_buffer_m"] = st.number_input(
-                "Defender Allowed Buffer (m):",
-                min_value=0.0,
-                max_value=100000.0,
-                value=float(line_cfg.get("defender_allowed_buffer_m", 5000.0)),
-            )
+    col1, col2 = st.columns(2)
+    with col1:
+        line_cfg["enabled"] = st.checkbox(
+            "Line Objective Active",
+            value=bool(line_cfg.get("enabled", True)),
+        )
+        line_cfg["attacker_team"] = st.selectbox(
+            "Attacker Team:",
+            ["A", "B"],
+            index=0 if line_cfg.get("attacker_team", "A") == "A" else 1,
+        )
+        defender_default = "B" if line_cfg["attacker_team"] == "A" else "A"
+        line_cfg["defender_team"] = st.selectbox(
+            "Defender Team:",
+            ["A", "B"],
+            index=0 if line_cfg.get("defender_team", defender_default) == "A" else 1,
+        )
+        line_cfg["penetration_line_north_m"] = st.number_input(
+            "Penetration Line North (m):",
+            min_value=-500000.0,
+            max_value=500000.0,
+            value=float(line_cfg.get("penetration_line_north_m", 100000.0)),
+        )
+        axis_deg = st.number_input(
+            "Penetration Axis (deg):",
+            min_value=-180.0,
+            max_value=180.0,
+            value=float(line_cfg.get("penetration_axis_rad", 0.0)) * 180.0 / 3.141592653589793,
+        )
+        line_cfg["penetration_axis_rad"] = axis_deg * 3.141592653589793 / 180.0
+    with col2:
+        line_cfg["attacker_crossing_bonus"] = st.number_input(
+            "Attacker Crossing Bonus:",
+            min_value=0.0,
+            max_value=1000.0,
+            value=float(line_cfg.get("attacker_crossing_bonus", 80.0)),
+        )
+        line_cfg["attacker_team_crossing_bonus"] = st.number_input(
+            "Attacker Team Crossing Bonus:",
+            min_value=0.0,
+            max_value=1000.0,
+            value=float(line_cfg.get("attacker_team_crossing_bonus", 120.0)),
+        )
+        line_cfg["attacker_progress_scale"] = st.number_input(
+            "Attacker Progress Scale:",
+            min_value=0.0,
+            max_value=1000.0,
+            value=float(line_cfg.get("attacker_progress_scale", 20.0)),
+        )
+        line_cfg["attacker_failure_penalty"] = st.number_input(
+            "Attacker Failure Penalty:",
+            min_value=-1000.0,
+            max_value=0.0,
+            value=float(line_cfg.get("attacker_failure_penalty", -80.0)),
+        )
+        line_cfg["attacker_stagnation_penalty"] = st.number_input(
+            "Attacker Stagnation Penalty:",
+            min_value=-1000.0,
+            max_value=0.0,
+            value=float(line_cfg.get("attacker_stagnation_penalty", -0.01)),
+        )
+        line_cfg["defender_hold_reward"] = st.number_input(
+            "Defender Hold Reward:",
+            min_value=0.0,
+            max_value=10.0,
+            value=float(line_cfg.get("defender_hold_reward", 0.05)),
+        )
+        line_cfg["defender_penetration_penalty"] = st.number_input(
+            "Defender Penetration Penalty:",
+            min_value=-1000.0,
+            max_value=0.0,
+            value=float(line_cfg.get("defender_penetration_penalty", -120.0)),
+        )
+        line_cfg["defender_terminal_success_reward"] = st.number_input(
+            "Defender Terminal Success Reward:",
+            min_value=0.0,
+            max_value=1000.0,
+            value=float(line_cfg.get("defender_terminal_success_reward", 80.0)),
+        )
+        line_cfg["crossing_buffer_m"] = st.number_input(
+            "Crossing Buffer (m):",
+            min_value=0.0,
+            max_value=50000.0,
+            value=float(line_cfg.get("crossing_buffer_m", 2000.0)),
+        )
+        line_cfg["count_crossing_once"] = st.checkbox(
+            "Count Crossing Once",
+            value=bool(line_cfg.get("count_crossing_once", True)),
+        )
+        line_cfg["attacker_success_requires_crossing"] = st.checkbox(
+            "Attacker Success Requires Crossing",
+            value=bool(line_cfg.get("attacker_success_requires_crossing", True)),
+        )
+        line_cfg["defender_destroyed_counts_as_attacker_success"] = st.checkbox(
+            "Defender Destroyed Counts as Attacker Success",
+            value=bool(line_cfg.get("defender_destroyed_counts_as_attacker_success", False)),
+        )
+        line_cfg["defender_no_cross_enabled"] = st.checkbox(
+            "Defender No-Cross Penalty Enabled",
+            value=bool(line_cfg.get("defender_no_cross_enabled", True)),
+        )
+        line_cfg["defender_crossing_penalty"] = st.number_input(
+            "Defender Crossing Penalty:",
+            min_value=-1000.0,
+            max_value=0.0,
+            value=float(line_cfg.get("defender_crossing_penalty", -20.0)),
+        )
+        line_cfg["defender_allowed_buffer_m"] = st.number_input(
+            "Defender Allowed Buffer (m):",
+            min_value=0.0,
+            max_value=100000.0,
+            value=float(line_cfg.get("defender_allowed_buffer_m", 5000.0)),
+        )
 
-    # Terminal Rewards
-    if reward_config["enable_terminal"]:
-        st.markdown("### Terminal Rewards")
 
-        with st.expander("1i  Terminal Rewards Explanation"):
-            st.markdown("""
-            **Terminal rewards** are given for episode-ending events:
-            - **Kill Reward**: Positive reward for destroying an enemy
-            - **Destruction Penalty**: Negative reward for being destroyed
-            - **Boundary Violation**: Penalty for leaving the engagement area
-            - **Last Team Standing**: Bonus for team survival
-            """)
+def _render_terminal_reward_settings(reward_config: dict[str, Any]) -> None:
+    st.markdown("### Terminal Rewards")
 
-        col1, col2 = st.columns(2)
+    with st.expander("1i  Terminal Rewards Explanation"):
+        st.markdown("""
+        **Terminal rewards** are given for episode-ending events:
+        - **Kill Reward**: Positive reward for destroying an enemy
+        - **Destruction Penalty**: Negative reward for being destroyed
+        - **Boundary Violation**: Penalty for leaving the engagement area
+        - **Last Team Standing**: Bonus for team survival
+        """)
 
-        with col1:
-            reward_config["kill_reward"] = st.number_input(
-                "Kill Reward:",
-                min_value=0.0,
-                max_value=1000.0,
-                value=reward_config.get("kill_reward", 200.0),
-                help="Reward for destroying an enemy aircraft",
-            )
+    col1, col2 = st.columns(2)
 
-            reward_config["destruction_penalty"] = st.number_input(
-                "Destruction Penalty:",
-                min_value=-1000.0,
-                max_value=0.0,
-                value=reward_config.get("destruction_penalty", -200.0),
-                help="Penalty for being destroyed",
-            )
+    with col1:
+        reward_config["kill_reward"] = st.number_input(
+            "Kill Reward:",
+            min_value=0.0,
+            max_value=1000.0,
+            value=reward_config.get("kill_reward", 200.0),
+            help="Reward for destroying an enemy aircraft",
+        )
 
-        with col2:
-            reward_config["boundary_violation_penalty"] = st.number_input(
-                "Boundary Violation Penalty:",
-                min_value=-500.0,
-                max_value=0.0,
-                value=reward_config.get("boundary_violation_penalty", -200.0),
-                help="Penalty for leaving the engagement area",
-            )
+        reward_config["destruction_penalty"] = st.number_input(
+            "Destruction Penalty:",
+            min_value=-1000.0,
+            max_value=0.0,
+            value=reward_config.get("destruction_penalty", -200.0),
+            help="Penalty for being destroyed",
+        )
 
-            reward_config["last_team_reward"] = st.number_input(
-                "Last Team Standing Reward:",
-                min_value=0.0,
-                max_value=200.0,
-                value=reward_config.get("last_team_reward", 40.0),
-                help="Bonus for team survival",
-            )
+    with col2:
+        reward_config["boundary_violation_penalty"] = st.number_input(
+            "Boundary Violation Penalty:",
+            min_value=-500.0,
+            max_value=0.0,
+            value=reward_config.get("boundary_violation_penalty", -200.0),
+            help="Penalty for leaving the engagement area",
+        )
 
-    # Tactical Rewards
-    if reward_config["enable_tactical"]:
-        st.markdown("### Tactical Rewards")
+        reward_config["last_team_reward"] = st.number_input(
+            "Last Team Standing Reward:",
+            min_value=0.0,
+            max_value=200.0,
+            value=reward_config.get("last_team_reward", 40.0),
+            help="Bonus for team survival",
+        )
 
-        with st.expander("1i  Tactical Rewards Explanation"):
-            st.markdown("""
-            **Tactical rewards** encourage good combat positioning:
-            - **Tracking Reward**: For maintaining radar lock on enemies
-            - **NEZ Positioning**: For positioning within No Escape Zone
-            - **Optimal Zone**: For maintaining optimal engagement range
-            - **SQI Shot Bonus**: For high Shot Quality Index missile launches
-            - **Early Shot Penalty**: Penalty for premature missile launches
-            """)
 
-        col1, col2 = st.columns(2)
+def _render_tactical_reward_settings(reward_config: dict[str, Any]) -> None:
+    st.markdown("### Tactical Rewards")
 
-        with col1:
-            reward_config["tracking_reward_scale"] = st.number_input(
-                "Tracking Reward Scale:",
-                min_value=0.0,
-                max_value=5.0,
-                value=reward_config.get("tracking_reward_scale", 0.5),
-                help="Reward scale for tracking enemies",
-            )
+    with st.expander("1i  Tactical Rewards Explanation"):
+        st.markdown("""
+        **Tactical rewards** encourage good combat positioning:
+        - **Tracking Reward**: For maintaining radar lock on enemies
+        - **NEZ Positioning**: For positioning within No Escape Zone
+        - **Optimal Zone**: For maintaining optimal engagement range
+        - **SQI Shot Bonus**: For high Shot Quality Index missile launches
+        - **Early Shot Penalty**: Penalty for premature missile launches
+        """)
 
-            reward_config["nez_positioning_reward_scale"] = st.number_input(
-                "NEZ Positioning Scale:",
-                min_value=0.0,
-                max_value=5.0,
-                value=reward_config.get("nez_positioning_reward_scale", 1.5),
-                help="Reward for positioning within No Escape Zone",
-            )
+    col1, col2 = st.columns(2)
 
-            reward_config["sqi_shot_bonus_scale"] = st.number_input(
-                "SQI Shot Bonus:",
-                min_value=0.0,
-                max_value=100.0,
-                value=reward_config.get("sqi_shot_bonus_scale", 0.0),
-                help="Disabled for training; SQI is used for metrics/evaluation only",
-            )
+    with col1:
+        reward_config["tracking_reward_scale"] = st.number_input(
+            "Tracking Reward Scale:",
+            min_value=0.0,
+            max_value=5.0,
+            value=reward_config.get("tracking_reward_scale", 0.5),
+            help="Reward scale for tracking enemies",
+        )
 
-        with col2:
-            reward_config["optimal_zone_reward_scale"] = st.number_input(
-                "Optimal Zone Scale:",
-                min_value=0.0,
-                max_value=5.0,
-                value=reward_config.get("optimal_zone_reward_scale", 0.8),
-                help="Reward for optimal engagement range",
-            )
+        reward_config["nez_positioning_reward_scale"] = st.number_input(
+            "NEZ Positioning Scale:",
+            min_value=0.0,
+            max_value=5.0,
+            value=reward_config.get("nez_positioning_reward_scale", 1.5),
+            help="Reward for positioning within No Escape Zone",
+        )
 
-            reward_config["early_shot_penalty_scale"] = st.number_input(
-                "Early Shot Penalty:",
-                min_value=-10.0,
-                max_value=0.0,
-                value=reward_config.get("early_shot_penalty_scale", 0.0),
-                help="Disabled; shot quality is learned from hit and kill outcomes",
-            )
+        reward_config["sqi_shot_bonus_scale"] = st.number_input(
+            "SQI Shot Bonus:",
+            min_value=0.0,
+            max_value=100.0,
+            value=reward_config.get("sqi_shot_bonus_scale", 0.0),
+            help="Disabled for training; SQI is used for metrics/evaluation only",
+        )
 
-            reward_config["sqi_bonus_threshold"] = st.number_input(
-                "SQI Bonus Threshold:",
-                min_value=0.0,
-                max_value=1.0,
-                value=reward_config.get("sqi_bonus_threshold", 0.55),
-                help="SQI threshold for shot bonus",
-            )
+    with col2:
+        reward_config["optimal_zone_reward_scale"] = st.number_input(
+            "Optimal Zone Scale:",
+            min_value=0.0,
+            max_value=5.0,
+            value=reward_config.get("optimal_zone_reward_scale", 0.8),
+            help="Reward for optimal engagement range",
+        )
 
-    # Energy Rewards
-    if reward_config["enable_energy"]:
-        st.markdown("### Energy Management Rewards")
+        reward_config["early_shot_penalty_scale"] = st.number_input(
+            "Early Shot Penalty:",
+            min_value=-10.0,
+            max_value=0.0,
+            value=reward_config.get("early_shot_penalty_scale", 0.0),
+            help="Disabled; shot quality is learned from hit and kill outcomes",
+        )
 
-        with st.expander("1i  Energy Rewards Explanation"):
-            st.markdown("""
-            **Energy rewards** encourage proper energy management:
-            - **Energy Reward**: For maintaining high energy state
-            - **Low Altitude Penalty**: For flying too low
-            - **Altitude Loss Penalty**: For excessive altitude loss
-            """)
+        reward_config["sqi_bonus_threshold"] = st.number_input(
+            "SQI Bonus Threshold:",
+            min_value=0.0,
+            max_value=1.0,
+            value=reward_config.get("sqi_bonus_threshold", 0.55),
+            help="SQI threshold for shot bonus",
+        )
 
-        col1, col2 = st.columns(2)
 
-        with col1:
-            reward_config["energy_reward_scale"] = st.number_input(
-                "Energy Reward Scale:",
-                min_value=0.0,
-                max_value=5.0,
-                value=reward_config.get("energy_reward_scale", 0.3),
-                help="Reward scale for energy state",
-            )
+def _render_energy_reward_settings(reward_config: dict[str, Any]) -> None:
+    st.markdown("### Energy Management Rewards")
 
-            reward_config["low_altitude_penalty_scale"] = st.number_input(
-                "Low Altitude Penalty:",
-                min_value=-10.0,
-                max_value=0.0,
-                value=reward_config.get("low_altitude_penalty_scale", -2.0),
-                help="Penalty for flying below minimum altitude",
-            )
+    with st.expander("1i  Energy Rewards Explanation"):
+        st.markdown("""
+        **Energy rewards** encourage proper energy management:
+        - **Energy Reward**: For maintaining high energy state
+        - **Low Altitude Penalty**: For flying too low
+        - **Altitude Loss Penalty**: For excessive altitude loss
+        """)
 
-        with col2:
-            reward_config["low_altitude_threshold_m"] = st.number_input(
-                "Low Altitude Threshold (m):",
-                min_value=1000.0,
-                max_value=10000.0,
-                value=reward_config.get("low_altitude_threshold_m", 5000.0),
-                help="Altitude below which penalty applies",
-            )
+    col1, col2 = st.columns(2)
 
-            reward_config["altitude_loss_penalty_scale"] = st.number_input(
-                "Altitude Loss Penalty:",
-                min_value=-1.0,
-                max_value=0.0,
-                value=reward_config.get("altitude_loss_penalty_scale", -0.1),
-                help="Penalty per meter of altitude lost",
-            )
+    with col1:
+        reward_config["energy_reward_scale"] = st.number_input(
+            "Energy Reward Scale:",
+            min_value=0.0,
+            max_value=5.0,
+            value=reward_config.get("energy_reward_scale", 0.3),
+            help="Reward scale for energy state",
+        )
 
-    # Control Rewards
-    if reward_config["enable_control"]:
-        st.markdown("### Control Rewards")
+        reward_config["low_altitude_penalty_scale"] = st.number_input(
+            "Low Altitude Penalty:",
+            min_value=-10.0,
+            max_value=0.0,
+            value=reward_config.get("low_altitude_penalty_scale", -2.0),
+            help="Penalty for flying below minimum altitude",
+        )
 
-        with st.expander("1i  Control Rewards Explanation"):
-            st.markdown("""
-            **Control rewards** encourage smooth flight and proper maneuvering:
-            - **Lift Balance Penalty**: For excessive load factor
-            - **Heading Alignment**: For proper heading towards targets
-            - **Passivity Penalty**: Discourages passive behavior
-            """)
+    with col2:
+        reward_config["low_altitude_threshold_m"] = st.number_input(
+            "Low Altitude Threshold (m):",
+            min_value=1000.0,
+            max_value=10000.0,
+            value=reward_config.get("low_altitude_threshold_m", 5000.0),
+            help="Altitude below which penalty applies",
+        )
 
-        col1, col2 = st.columns(2)
+        reward_config["altitude_loss_penalty_scale"] = st.number_input(
+            "Altitude Loss Penalty:",
+            min_value=-1.0,
+            max_value=0.0,
+            value=reward_config.get("altitude_loss_penalty_scale", -0.1),
+            help="Penalty per meter of altitude lost",
+        )
 
-        with col1:
-            reward_config["lift_balance_penalty_scale"] = st.number_input(
-                "Lift Balance Penalty:",
-                min_value=-5.0,
-                max_value=0.0,
-                value=reward_config.get("lift_balance_penalty_scale", -0.8),
-                help="Penalty for excessive load factor",
-            )
 
-            reward_config["heading_alignment_reward_scale"] = st.number_input(
-                "Heading Alignment Scale:",
-                min_value=0.0,
-                max_value=2.0,
-                value=reward_config.get("heading_alignment_reward_scale", 0.2),
-                help="Reward for proper heading alignment",
-            )
+def _render_control_reward_settings(reward_config: dict[str, Any]) -> None:
+    st.markdown("### Control Rewards")
 
-        with col2:
-            reward_config["passivity_penalty_scale"] = st.number_input(
-                "Passivity Penalty:",
-                min_value=-5.0,
-                max_value=0.0,
-                value=reward_config.get("passivity_penalty_scale", -1.0),
-                help="Penalty for passive behavior",
-            )
+    with st.expander("1i  Control Rewards Explanation"):
+        st.markdown("""
+        **Control rewards** encourage smooth flight and proper maneuvering:
+        - **Lift Balance Penalty**: For excessive load factor
+        - **Heading Alignment**: For proper heading towards targets
+        - **Passivity Penalty**: Discourages passive behavior
+        """)
 
-    # Defensive Rewards
-    if reward_config["enable_defensive"]:
-        st.markdown("### Defensive Rewards")
+    col1, col2 = st.columns(2)
 
-        with st.expander("1i  Defensive Rewards Explanation"):
-            st.markdown("""
-            **Defensive rewards** encourage survival and evasion:
-            - **Evasion Reward**: For successful defensive maneuvers
-            - **Boundary Penalties**: Progressive penalties near boundaries
-            """)
+    with col1:
+        reward_config["lift_balance_penalty_scale"] = st.number_input(
+            "Lift Balance Penalty:",
+            min_value=-5.0,
+            max_value=0.0,
+            value=reward_config.get("lift_balance_penalty_scale", -0.8),
+            help="Penalty for excessive load factor",
+        )
 
-        col1, col2 = st.columns(2)
+        reward_config["heading_alignment_reward_scale"] = st.number_input(
+            "Heading Alignment Scale:",
+            min_value=0.0,
+            max_value=2.0,
+            value=reward_config.get("heading_alignment_reward_scale", 0.2),
+            help="Reward for proper heading alignment",
+        )
 
-        with col1:
-            reward_config["evasion_reward_scale"] = st.number_input(
-                "Evasion Reward Scale:",
-                min_value=0.0,
-                max_value=5.0,
-                value=reward_config.get("evasion_reward_scale", 0.8),
-                help="Reward for successful evasion",
-            )
+    with col2:
+        reward_config["passivity_penalty_scale"] = st.number_input(
+            "Passivity Penalty:",
+            min_value=-5.0,
+            max_value=0.0,
+            value=reward_config.get("passivity_penalty_scale", -1.0),
+            help="Penalty for passive behavior",
+        )
 
-        with col2:
-            reward_config["boundary_progressive_penalty_scale"] = st.number_input(
-                "Progressive Boundary Penalty:",
-                min_value=-20.0,
-                max_value=0.0,
-                value=reward_config.get("boundary_progressive_penalty_scale", -10.0),
-                help="Progressive penalty near boundaries",
-            )
 
+def _render_defensive_reward_settings(reward_config: dict[str, Any]) -> None:
+    st.markdown("### Defensive Rewards")
+
+    with st.expander("1i  Defensive Rewards Explanation"):
+        st.markdown("""
+        **Defensive rewards** encourage survival and evasion:
+        - **Evasion Reward**: For successful defensive maneuvers
+        - **Boundary Penalties**: Progressive penalties near boundaries
+        """)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        reward_config["evasion_reward_scale"] = st.number_input(
+            "Evasion Reward Scale:",
+            min_value=0.0,
+            max_value=5.0,
+            value=reward_config.get("evasion_reward_scale", 0.8),
+            help="Reward for successful evasion",
+        )
+
+    with col2:
+        reward_config["boundary_progressive_penalty_scale"] = st.number_input(
+            "Progressive Boundary Penalty:",
+            min_value=-20.0,
+            max_value=0.0,
+            value=reward_config.get("boundary_progressive_penalty_scale", -10.0),
+            help="Progressive penalty near boundaries",
+        )
+
+
+def _render_reward_normalization_settings(config: dict[str, Any]) -> None:
     st.markdown("### Reward Normalization")
     norm_cfg = config.setdefault("env", {}).setdefault(
         "reward_normalization", {"enabled": False, "clip_reward": 10.0}
@@ -1521,14 +1725,11 @@ def render_rewards_settings():
             value=float(norm_cfg.get("clip_reward", 10.0)),
         )
 
-    write_reward_view_to_config(config, reward_config)
-
 
 def render_config_comparison():
     """Render configuration comparison interface."""
     st.subheader("Configuration Comparison")
 
-    # Load configurations for comparison
     existing_configs = st.session_state.config_manager.get_existing_configs()
     config_names = [Path(f).name for f in existing_configs]
 
@@ -1536,7 +1737,6 @@ def render_config_comparison():
         st.warning("You need at least 2 saved configurations to compare.")
         return
 
-    # Select configurations to compare
     col1, col2 = st.columns(2)
 
     with col1:
@@ -1550,16 +1750,13 @@ def render_config_comparison():
         )
 
     if st.button("Compare Configurations"):
-        # Load both configurations
         config1_path = next(f for f in existing_configs if Path(f).name == config1_name)
         config2_path = next(f for f in existing_configs if Path(f).name == config2_name)
 
         config1 = st.session_state.config_manager.load_config(config1_path)
         config2 = st.session_state.config_manager.load_config(config2_path)
 
-        # Compare configurations
         st.markdown("### Configuration Differences")
-
         differences = find_config_differences(config1, config2)
 
         if not differences:
@@ -1584,39 +1781,11 @@ def find_config_differences(
     config1: dict[str, Any], config2: dict[str, Any]
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """Find differences between two configurations."""
-    differences = {}
-
-    def compare_section(section_name: str, section1: Any, section2: Any, path: str = ""):
-        if section_name not in differences:
-            differences[section_name] = {}
-
-        if isinstance(section1, dict) and isinstance(section2, dict):
-            # Compare dictionaries recursively
-            all_keys = set(section1.keys()) | set(section2.keys())
-            for key in all_keys:
-                key_path = f"{path}.{key}" if path else key
-                val1 = section1.get(key, "NOT_SET")
-                val2 = section2.get(key, "NOT_SET")
-
-                if isinstance(val1, dict) and isinstance(val2, dict):
-                    compare_section(section_name, val1, val2, key_path)
-                elif val1 != val2:
-                    differences[section_name][key_path] = {"config1": val1, "config2": val2}
-        elif section1 != section2:
-            differences[section_name][path or section_name] = {
-                "config1": section1,
-                "config2": section2,
-            }
-
-    # Compare main sections
-    for section in ["env", "training", "model", "logging"]:
-        if section in config1 or section in config2:
-            compare_section(section, config1.get(section, {}), config2.get(section, {}))
-
-    # Remove empty sections
-    differences = {k: v for k, v in differences.items() if v}
-
-    return differences
+    return collect_config_differences(
+        (section, config1.get(section, {}), config2.get(section, {}), "")
+        for section in ["env", "training", "model", "logging"]
+        if section in config1 or section in config2
+    )
 
 
 if __name__ == "__main__":

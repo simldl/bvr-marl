@@ -1,16 +1,4 @@
-"""
-SymbolRegistry — loads pre-generated PNG symbols as Cairo surfaces, cached by key.
-
-Two source directories under visualization/symbols/png/:
-  nato/          : MIL-STD-2525C symbols — fighter_{affiliation}_N.png
-                                           awacs_{affiliation}_N.png
-                                           sam_{affiliation}_N.png
-  flying_objects/: Aircraft silhouettes  — {aircraft_type}_{side}_N.png
-                   (f22, f35, eurofighter, su57, awacs, missile, f15ex) × (blue, red)
-
-Generate both with:
-    node visualization/symbols/generate_symbols.js
-"""
+"""Load pre-generated tactical symbols as cached Cairo surfaces."""
 
 from pathlib import Path
 
@@ -22,7 +10,8 @@ class SymbolRegistry:
     """Loads PNG symbols, converts to Cairo ImageSurface, caches by lookup key."""
 
     _DEFAULT_DIR = Path(__file__).resolve().parent.parent / "symbols"
-    _AVAILABLE_SIZES = [20, 28, 32, 40, 64, 96, 128]
+    _AVAILABLE_SIZES = (20, 28, 32, 40, 64, 96, 128)
+    _FIGHTER_TYPES = frozenset({"f22", "f35", "eurofighter", "su57", "f15ex"})
 
     def __init__(self, symbols_dir: str | Path | None = None, mode: str = "nato"):
         """
@@ -33,7 +22,7 @@ class SymbolRegistry:
         self.symbols_dir = Path(symbols_dir) if symbols_dir else self._DEFAULT_DIR
         self.mode = mode
         self._cache: dict[tuple, cairo.ImageSurface] = {}
-        self._data_refs: dict[tuple, bytearray] = {}  # keep Cairo backing buffers alive
+        self._data_refs: dict[tuple, bytearray] = {}
 
     @property
     def _nato_dir(self) -> Path:
@@ -42,8 +31,6 @@ class SymbolRegistry:
     @property
     def _flying_dir(self) -> Path:
         return self.symbols_dir / "png" / "flying_objects"
-
-    # Public: NATO symbols (fighter / awacs / sam × affiliation)
 
     def has_nato(self, symbol_id: str, affiliation: str) -> bool:
         """Return True if a PNG exists for this NATO symbol/affiliation."""
@@ -68,8 +55,6 @@ class SymbolRegistry:
             self._data_refs[key] = data
         return self._cache[key]
 
-    # Public: Flying-object symbols (aircraft/missile × side)
-
     def has_flying(self, aircraft_type: str, side: str) -> bool:
         """Return True if a PNG exists for this aircraft type and side."""
         for s in self._AVAILABLE_SIZES:
@@ -88,12 +73,14 @@ class SymbolRegistry:
                     f"Flying-object symbol PNG not found: {png_path}\n"
                     f"Run 'node visualization/symbols/generate_symbols.js' to generate."
                 )
-            surface, data = self._load_png(png_path, size)
+            normalized_size = size
+            is_fighter = aircraft_type.lower() in self._FIGHTER_TYPES
+            if is_fighter:
+                normalized_size = self._eurofighter_visible_size(side, png_size, size)
+            surface, data = self._load_png(png_path, normalized_size, normalize_visible=is_fighter)
             self._cache[key] = surface
             self._data_refs[key] = data
         return self._cache[key]
-
-    # Availability check (used to decide whether to try loading)
 
     def available_symbols(self) -> list[str]:
         """List available PNG symbol stems across both source directories."""
@@ -103,8 +90,6 @@ class SymbolRegistry:
                 results.extend(f.stem for f in d.glob("*.png"))
         return results
 
-    # Internal helpers
-
     def _best_size(self, requested: int) -> int:
         """Pick the smallest pre-generated PNG size that is >= requested."""
         for s in self._AVAILABLE_SIZES:
@@ -112,7 +97,21 @@ class SymbolRegistry:
                 return s
         return self._AVAILABLE_SIZES[-1]
 
-    def _load_png(self, png_path: Path, size: int) -> tuple[cairo.ImageSurface, bytearray]:
+    def _eurofighter_visible_size(self, side: str, png_size: int, requested: int) -> int:
+        """Scale fighters to the original Eurofighter's occupied-pixel extent."""
+        reference = self._flying_dir / f"eurofighter_{side}_{png_size}.png"
+        if not reference.exists():
+            return requested
+        with Image.open(reference) as source:
+            bounds = source.convert("RGBA").getchannel("A").getbbox()
+        if bounds is None:
+            return requested
+        visible_extent = max(bounds[2] - bounds[0], bounds[3] - bounds[1])
+        return max(1, round(visible_extent * requested / png_size))
+
+    def _load_png(
+        self, png_path: Path, size: int, *, normalize_visible: bool = False
+    ) -> tuple[cairo.ImageSurface, bytearray]:
         """Load a PNG, optionally rescale to size, return (Cairo surface, backing buffer).
 
         Converts RGBA → Cairo ARGB32 (pre-multiplied alpha, BGRA byte order) using
@@ -122,6 +121,15 @@ class SymbolRegistry:
 
         img = Image.open(png_path).convert("RGBA")
 
+        # Source fighter artwork has very different transparent margins (for
+        # example, the old 64 px Eurofighter occupies only 27x38 px while the
+        # Su-57 occupies 46x61 px).  Crop those margins before scaling so every
+        # fighter's *visible* longest dimension equals the requested symbol size.
+        if normalize_visible:
+            visible_bounds = img.getchannel("A").getbbox()
+            if visible_bounds is not None:
+                img = img.crop(visible_bounds)
+
         actual = max(img.width, img.height)
         if actual != size:
             ratio = size / actual
@@ -130,18 +138,16 @@ class SymbolRegistry:
             img = img.resize((new_w, new_h), Image.LANCZOS)
 
         w, h = img.size
-        rgba = np.array(img, dtype=np.float32)  # H×W×4, channels: R G B A in [0,255]
-        alpha_norm = rgba[:, :, 3] / 255.0  # normalised alpha [0,1]
+        rgba = np.array(img, dtype=np.float32)
+        alpha_norm = rgba[:, :, 3] / 255.0
 
-        # Pre-multiply RGB by alpha (Cairo ARGB32 requirement)
         pm = (rgba[:, :, :3] * alpha_norm[:, :, np.newaxis]).astype(np.uint8)
 
-        # Pack into BGRA byte order (Cairo ARGB32 little-endian layout)
         bgra = np.empty((h, w, 4), dtype=np.uint8)
-        bgra[:, :, 0] = pm[:, :, 2]  # B pre-multiplied
-        bgra[:, :, 1] = pm[:, :, 1]  # G pre-multiplied
-        bgra[:, :, 2] = pm[:, :, 0]  # R pre-multiplied
-        bgra[:, :, 3] = rgba[:, :, 3].astype(np.uint8)  # A unchanged
+        bgra[:, :, 0] = pm[:, :, 2]
+        bgra[:, :, 1] = pm[:, :, 1]
+        bgra[:, :, 2] = pm[:, :, 0]
+        bgra[:, :, 3] = rgba[:, :, 3].astype(np.uint8)
 
         data = bytearray(bgra.tobytes())
         surface = cairo.ImageSurface.create_for_data(data, cairo.FORMAT_ARGB32, w, h, w * 4)

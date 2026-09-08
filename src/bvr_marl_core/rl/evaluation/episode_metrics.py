@@ -14,7 +14,7 @@ import csv
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -343,7 +343,6 @@ class MetricsCollector:
             last_opponent_death if opponent_survivors == 0 else episode_duration_s
         )
 
-        # Compute derived metrics
         ep.compute_derived_metrics()
 
         # Store episode

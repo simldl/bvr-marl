@@ -1,77 +1,75 @@
-"""Shared SQI (shot quality index) model used by the aircraft SQI graphics.
+"""Shared SQI (shot-quality index) accessor for the aircraft SQI graphics.
 
-The logistic model mirrors ``aircraft/core/nez.py:sqi()`` in ``bvr_marl_core``.
-AMRAAM range is read from the missile class source when available, with a
-hard-coded fallback so the scripts run even if the import path changes.
+Calls ``NoEscapeZoneCalculator.sqi()`` directly. It previously reimplemented a
+logistic in ``a0 + a_d*d + a_vc*vc + a_th*cos + a_rho*rho`` form and kept the
+coefficients "in sync" by hand -- but production replaced that logistic with a
+piecewise zone model precisely because the logistic still returned ~0.35 far
+beyond maximum range, i.e. it scored a kinematically impossible shot as
+half-viable. The figures were therefore plotting a superseded model.
+
+Range parameters are read from the missile classes through
+``MissileParameters.from_missile_class`` rather than by grepping their source
+text for a literal, which previously picked up the seeker's radar range
+(150 km) in place of the weapon's kinematic maximum (160 km).
 """
 
 from __future__ import annotations
 
-import numpy as np
+import sys
+from pathlib import Path
 
-# Logistic SQI coefficients (kept in sync with bvr_marl_core nez.sqi()).
-_A0 = -1.4  # baseline threshold
-_A_D = 3.0  # distance / range factor
-_A_VC = 1.2  # closure-rate factor (normalised by 400 m/s)
-_A_TH = 0.8  # aspect-angle factor (cosine of relative heading)
-_A_RHO = 0.25  # altitude / density factor
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nez_probe import (  # noqa: E402
+    REFERENCE_TARGET_RCS_M2,
+    amraam_params,
+    dlz_at,
+    meteor_params,
+    sqi_at,
+)
+
+__all__ = [
+    "REFERENCE_TARGET_RCS_M2",
+    "amraam_params",
+    "compute_sqi",
+    "dlz_at",
+    "get_amraam_params",
+    "get_meteor_base_range_km",
+    "meteor_params",
+    "sqi_at",
+]
 
 
-def get_amraam_params():
-    """Return (base_range_km, min_range_km) for the AMRAAM, reading the source.
+def get_amraam_params() -> tuple[float, float]:
+    """Return ``(max_range_km, min_range_km)`` for the AMRAAM from the model."""
+    p = amraam_params()
+    return p.max_range_m / 1000.0, p.min_range_m / 1000.0
 
-    Falls back to (150.0, 1.5) if the missile class cannot be imported.
+
+def get_meteor_base_range_km() -> float:
+    """Return the Meteor kinematic maximum range in km, from the model."""
+    return meteor_params().max_range_m / 1000.0
+
+
+def compute_sqi(
+    range_km: float,
+    *,
+    tgt_speed_mps: float = 250.0,
+    tgt_yaw_deg: float = 180.0,
+    own_alt_m: float = 10_000.0,
+    own_speed_mps: float = 300.0,
+    tgt_alt_m: float = 10_000.0,
+) -> float:
+    """Production shot-quality index for one geometry.
+
+    ``tgt_yaw_deg`` is the target's heading: 180 closes head-on, 0 runs away,
+    90 beams. Together with ``tgt_speed_mps`` this sets the aspect term, which
+    is what the zone model actually reads.
     """
-    base_range_km, min_range_km = 150.0, 1.5
-    try:
-        import inspect
-
-        from bvr_marl_core.missiles.fox3.amraam import AIM120_AMRAAM
-
-        source = inspect.getsource(AIM120_AMRAAM.__init__)
-        if "150_000" in source:
-            base_range_km = 150.0
-        elif "40_000" in source:
-            base_range_km = 40.0
-        print(f"[OK] AMRAAM base range from source: {base_range_km} km")
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        print(f"[WARN] Using hard-coded AMRAAM values: {exc}")
-    return base_range_km, min_range_km
-
-
-def get_meteor_base_range_km():
-    """Return the Meteor base range in km, reading the source with fallback."""
-    base_range_km = 200.0
-    try:
-        import inspect
-
-        from bvr_marl_core.missiles.fox3.meteor import Meteor
-
-        source = inspect.getsource(Meteor.__init__)
-        if "200_000" in source:
-            base_range_km = 200.0
-        elif "50_000" in source:
-            base_range_km = 50.0
-        print(f"[OK] Meteor base range from source: {base_range_km} km")
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        print(f"[WARN] Using hard-coded Meteor values: {exc}")
-    return base_range_km
-
-
-def compute_sqi(distance_normalized, closure_rate_norm, aspect_cos, rho_ratio=1.0):
-    """Compute SQI in [0, 1] from the logistic model.
-
-    Args:
-        distance_normalized: Range factor (0 = max range, 1 = min range).
-        closure_rate_norm: Closure rate / 400 m/s, clipped to [-1, 1].
-        aspect_cos: Cosine of the relative heading angle.
-        rho_ratio: Altitude density ratio (1.0 at sea level).
-    """
-    x = (
-        _A0
-        + _A_D * distance_normalized
-        + _A_VC * closure_rate_norm
-        + _A_TH * aspect_cos
-        + _A_RHO * (rho_ratio - 1)
+    return sqi_at(
+        range_km,
+        tgt_speed_mps=tgt_speed_mps,
+        tgt_yaw_deg=tgt_yaw_deg,
+        own_alt_m=own_alt_m,
+        own_speed_mps=own_speed_mps,
+        tgt_alt_m=tgt_alt_m,
     )
-    return 1.0 / (1.0 + np.exp(-x))

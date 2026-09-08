@@ -6,7 +6,7 @@ for the team. AWACS is a support asset, not a combat aircraft.
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -25,9 +25,14 @@ class AWACS(Aircraft):
     This simulates the need to point the aircraft toward targets for weapons-quality tracking.
     """
 
+    # Large, soft, high-value platform — a distinct vulnerability class so Phase-8
+    # tuning can differentiate it from a fighter.
+    vulnerability_class: str = "awacs"
+
     @dataclass
     class Config:
         mass_kg: float = 150_000.0
+        fuel_capacity_kg: float = 50_000.0  # large tanker/AEW fuel load
         reference_area_m2: float = 283.0
         aspect_ratio: float = 7.1
         oswald_e: float = 0.80
@@ -41,13 +46,17 @@ class AWACS(Aircraft):
         min_alt_m: float = 0.0
         max_alt_m: float = 12_000.0
 
-        # Rotating dome gives 360° detection; lock is limited to a narrower FOV
+        # Rotating dome gives 360° detection; lock is limited to a narrower FOV.
+        # The workshop replaced a single very-potent AWACS (400 km, 100 kW, 45 dB)
+        # with two less-potent 360-degree systems: ~250 km range, lower power/gain.
+        # Two of these are spawned per team (AWACSConfigData.count_per_team), giving
+        # spatial diversity and graceful degradation instead of one super-sensor.
         radar_horizontal_fov_deg: float = 360.0
         radar_vertical_fov_deg: float = 60.0
-        radar_max_range_m: float = 400_000.0
+        radar_max_range_m: float = 250_000.0
         radar_frequency_hz: float = 3.0e9
-        radar_tx_power_w: float = 100e3
-        radar_antenna_gain_db: float = 45.0
+        radar_tx_power_w: float = 25e3
+        radar_antenna_gain_db: float = 40.0
         radar_snr_threshold_db: float = 6.0
         radar_beam_rate_hz: float = 6.0
         radar_beam_rate_p_hz: float = 4.0
@@ -101,6 +110,7 @@ class AWACS(Aircraft):
         max_alt_m: float,
         name: str = "AWACS",
         lock_fov_deg: float | None = None,
+        radar_overrides: dict | None = None,
     ):
         cfg = self.Config()
         cfg.min_alt_m = min_alt_m
@@ -109,6 +119,13 @@ class AWACS(Aircraft):
         # Allow lock FOV to be overridden at instantiation
         if lock_fov_deg is not None:
             cfg.lock_fov_deg = lock_fov_deg
+
+        # Optional per-scenario radar retuning (range/power/gain/threshold). Only
+        # non-None entries override the type default, so scenarios can make the
+        # surveillance picture weaker or stronger without editing this class.
+        for key, value in (radar_overrides or {}).items():
+            if value is not None and hasattr(cfg, key):
+                setattr(cfg, key, value)
 
         super().__init__(
             name=name,
@@ -123,7 +140,26 @@ class AWACS(Aircraft):
         # Mark as support asset
         self.is_support_asset = True
         self.is_high_value_target = True
-        self.is_non_engageable = True  # By default, AWACS cannot be targeted
+        self.is_non_engageable = True  # ROE: may not be shot at
+        # Invisible to hostile sensors: an AWACS is here to PROVIDE radar support,
+        # not to be found by it. This is the stronger and more honest statement of
+        # the two -- `is_non_engageable` only refuses the launch, and a refused
+        # launch still costs everything upstream of it: the unit is swept, its RCS
+        # and SNR are computed, it becomes a detection, a track, a contact, and it
+        # OCCUPIES A TARGET SLOT. Measured over 10 matched pairs, blinding the AWACS
+        # raised real shot opportunities 1.75x (in 10 of 10 episodes) while the
+        # selector addressed one directly on only 2.6% of steps -- the damage was
+        # slot occupancy, not mis-selection.
+        #
+        # Both flags are kept: they are different rules. Invisibility is about
+        # being SEEN; ROE is about being SHOT AT, and a scenario may legitimately
+        # want a visible-but-protected unit.
+        #
+        # Scenarios drive this through `AWACSConfigData.awacs_sensor_invisible`, which
+        # `spawn_utils.spawn_awacs` applies to the constructed unit. The type default
+        # is True so an AWACS built directly (tests, tooling, the video plotter) is
+        # blind-by-default like a spawned one.
+        self.is_sensor_invisible = bool(getattr(cfg, "sensor_invisible", True))
 
         # Lock FOV - separate from radar detection FOV
         # Detection: 360° (can see all around)
@@ -152,6 +188,14 @@ class AWACS(Aircraft):
         its orbit centre is first moved to keep the AWACS a safe distance behind
         the team's fighters.
         """
+        self._apply_orbit_control(tick_secs, sim)
+        return super().update(tick_secs, sim)
+
+    def update_after_staged_sensors(self, tick_secs: float, sim) -> list:
+        self._apply_orbit_control(tick_secs, sim)
+        return super().update_after_staged_sensors(tick_secs, sim)
+
+    def _apply_orbit_control(self, tick_secs: float, sim) -> None:
         if getattr(self, "orbit_controller", None) is not None:
             self._update_trailing_center(tick_secs, sim)
             controls = self.orbit_controller.get_commanded_controls(self, tick_secs)
@@ -159,16 +203,13 @@ class AWACS(Aircraft):
             # Desired heading (physics turns gradually toward this)
             self.control.set_yaw_deg(controls.get("target_heading_deg", self.yaw_deg))
 
-            # Throttle
             self.control.set_throttle(controls.get("throttle", 1.0))
 
             # Altitude control via pitch angle
             target_alt = controls.get("target_altitude_m", self.position.alt)
             alt_error_m = target_alt - self.position.alt
-            desired_pitch = float(np.clip(alt_error_m / 500.0 * 5.0, -10.0, 10.0))
+            desired_pitch = min(max(alt_error_m / 500.0 * 5.0, -10.0), 10.0)
             self.control.set_pitch_deg(desired_pitch)
-
-        return super().update(tick_secs, sim)
 
     def _update_trailing_center(self, tick_secs: float, sim) -> None:
         """

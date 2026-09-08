@@ -5,6 +5,6 @@ This module now imports from the new modular structure.
 The ObservationBuilder class is re-exported from observation module.
 """
 
-from .observation import ObservationBuilder
+from bvr_marl_core.rl.environment.spaces.observation import ObservationBuilder
 
 __all__ = ["ObservationBuilder"]

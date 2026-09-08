@@ -1,5 +1,5 @@
 """
-GUI extension API for bvr-marl-core.
+GUI extension API for bvr-marl.
 
 Defines the contract that external extension packages must
 implement to inject pages into the core GUI shell.
@@ -16,7 +16,7 @@ The registered callable must return a list of ``PageSpec`` objects.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -51,3 +51,6 @@ class PageSpec:
 # An extension entry-point must be a zero-argument callable that returns
 # a list of PageSpec objects.
 ExtensionFactory = Callable[[], list[PageSpec]]
+
+
+__all__ = ["PageSpec", "ExtensionFactory"]

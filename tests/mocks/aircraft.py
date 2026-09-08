@@ -555,7 +555,7 @@ class MockAircraft:
         # Target selection and engagement
         candidates = self._get_target_candidates(simulator)
         self.target = self.weapons.select_and_engage_target(
-            candidates, action[3], action[4], action[5] if len(action) > 5 else 0.0, simulator
+            candidates, action[4], action[3], action[5] if len(action) > 5 else 0.0, simulator
         )
 
         # Countermeasures

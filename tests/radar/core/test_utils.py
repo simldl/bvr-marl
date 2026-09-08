@@ -9,6 +9,7 @@ from bvr_marl_core.radar.core.utils import (
     _effective_rcs,
     enu_to_geodetic,
     geodetic_to_enu,
+    has_effective_earth_line_of_sight,
     to_cart,
 )
 
@@ -59,6 +60,26 @@ def test_doppler_is_exact():
     # az=90° points East, so LOS is aligned with velocity
     dop = _doppler(t, az_abs_deg=90, el_abs_deg=0, freq_hz=freq)
     assert np.isclose(dop, expected, rtol=1e-3)
+
+
+def test_doppler_uses_relative_velocity():
+    target = SimpleNamespace(velocity=np.array([210.0, 0.0, 0.0]))
+    co_moving = _doppler(
+        target,
+        az_abs_deg=90,
+        el_abs_deg=0,
+        freq_hz=10e9,
+        radar_velocity=np.array([210.0, 0.0, 0.0]),
+    )
+    assert co_moving == pytest.approx(0.0, abs=1e-12)
+
+
+def test_effective_earth_horizon_gate():
+    assert has_effective_earth_line_of_sight(100_000.0, 10_000.0, 10_000.0)
+    assert not has_effective_earth_line_of_sight(100_000.0, 0.0, 0.0)
+    # Symmetric 100 m platforms have a roughly 82 km 4/3-Earth mutual horizon.
+    assert has_effective_earth_line_of_sight(80_000.0, 100.0, 100.0)
+    assert not has_effective_earth_line_of_sight(85_000.0, 100.0, 100.0)
 
 
 def test_to_cart_is_cartesian():

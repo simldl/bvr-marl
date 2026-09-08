@@ -6,7 +6,7 @@ to maintain station while providing radar coverage.
 """
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 
@@ -188,7 +188,7 @@ class RacetrackController:
         """Get control commands for the aircraft."""
         heading, speed, altitude = self.update(unit, dt)
         max_speed = getattr(unit, "max_speed_mps", 250.0)
-        throttle = np.clip(speed / max_speed, 0.0, 1.0)
+        throttle = min(max(speed / max_speed, 0.0), 1.0)
 
         return {
             "throttle": throttle,
@@ -324,7 +324,7 @@ class Figure8Controller:
         heading, speed, altitude = self.update(unit, dt)
 
         max_speed = getattr(unit, "max_speed_mps", 250.0)
-        throttle = np.clip(speed / max_speed, 0.0, 1.0)
+        throttle = min(max(speed / max_speed, 0.0), 1.0)
 
         return {
             "throttle": throttle,
@@ -413,7 +413,7 @@ class CircleController:
         """Get control commands for the aircraft."""
         heading, speed, altitude = self.update(unit, dt)
         max_speed = getattr(unit, "max_speed_mps", 250.0)
-        throttle = np.clip(speed / max_speed, 0.0, 1.0)
+        throttle = min(max(speed / max_speed, 0.0), 1.0)
         return {
             "throttle": throttle,
             "target_altitude_m": altitude,
@@ -437,7 +437,7 @@ class RandomWaypointController:
             config.pattern = "random"
         self.config = config
         self.km_per_deg = 111.0
-        self.rng = rng if rng is not None else np.random.default_rng()
+        self.rng = rng if rng is not None else np.random.default_rng(0)
 
         r_deg = config.turn_radius_km / self.km_per_deg
         margin = 0.05  # inward shrink to keep waypoints away from zone edges
@@ -513,7 +513,7 @@ class RandomWaypointController:
         """Get control commands for the aircraft."""
         heading, speed, altitude = self.update(unit, dt)
         max_speed = getattr(unit, "max_speed_mps", 250.0)
-        throttle = np.clip(speed / max_speed, 0.0, 1.0)
+        throttle = min(max(speed / max_speed, 0.0), 1.0)
         return {
             "throttle": throttle,
             "target_altitude_m": altitude,
@@ -601,11 +601,11 @@ def compute_trailing_center(unit, sim, config: OrbitConfig) -> tuple[float, floa
     if config.zone_min_lat is not None and config.zone_max_lat is not None:
         lo, hi = config.zone_min_lat + r_deg, config.zone_max_lat - r_deg
         if lo <= hi:
-            center_lat = float(np.clip(center_lat, lo, hi))
+            center_lat = min(max(center_lat, lo), hi)
     if config.zone_min_lon is not None and config.zone_max_lon is not None:
         lo, hi = config.zone_min_lon + r_deg, config.zone_max_lon - r_deg
         if lo <= hi:
-            center_lon = float(np.clip(center_lon, lo, hi))
+            center_lon = min(max(center_lon, lo), hi)
 
     return center_lat, center_lon
 
@@ -652,7 +652,7 @@ def create_orbit_controller(
         Configured orbit controller.
     """
     if pattern == "random_all":
-        _rng = rng if rng is not None else np.random.default_rng()
+        _rng = rng if rng is not None else np.random.default_rng(0)
         pattern = str(_rng.choice(["circle", "figure8", "racetrack", "random"]))
 
     config = OrbitConfig(

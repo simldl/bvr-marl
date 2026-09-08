@@ -29,16 +29,16 @@ FMUPlugin
     Functional Mock-up Unit integration.
 """
 
-from .controller import Controller, ScriptedController
-from .factory import ControllerFactory
-from .flight_model import FlightModelPlugin
-from .fmu import FMUPlugin
-from .observation import ObservationHook
-from .protocol_adapter import ProtocolAdapter
-from .reward import RewardFunction
-from .sensor import SensorPlugin
-from .visualizer import VisualizerPlugin
-from .weapon import WeaponPlugin
+from bvr_marl_core.interfaces.controller import Controller, ScriptedController
+from bvr_marl_core.interfaces.factory import ControllerFactory
+from bvr_marl_core.interfaces.flight_model import FlightModelPlugin
+from bvr_marl_core.interfaces.fmu import FMUPlugin
+from bvr_marl_core.interfaces.observation import ObservationHook
+from bvr_marl_core.interfaces.protocol_adapter import ProtocolAdapter
+from bvr_marl_core.interfaces.reward import RewardFunction
+from bvr_marl_core.interfaces.sensor import SensorPlugin
+from bvr_marl_core.interfaces.visualizer import VisualizerPlugin
+from bvr_marl_core.interfaces.weapon import WeaponPlugin
 
 __all__ = [
     "Controller",

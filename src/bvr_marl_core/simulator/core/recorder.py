@@ -14,14 +14,12 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
-import random
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 # Replay log schema version — bump when the log format itself changes.
-_REPLAY_SCHEMA_VERSION = "1.1"
+_REPLAY_SCHEMA_VERSION = "1.2"
 
 
 def _core_version() -> str:
@@ -29,10 +27,7 @@ def _core_version() -> str:
     try:
         return importlib.metadata.version("bvr-marl")
     except importlib.metadata.PackageNotFoundError:
-        try:
-            return importlib.metadata.version("bvr-marl-core")
-        except importlib.metadata.PackageNotFoundError:
-            return "unknown"
+        return "unknown"
 
 
 @dataclass
@@ -54,6 +49,7 @@ class ReplayLog:
     start_utc_iso: str = ""
     tick_secs: float = 1.0
     env_settings: dict[str, Any] = field(default_factory=dict)  # extra determinants
+    experiment_metadata: dict[str, Any] = field(default_factory=dict)
     setup_events: list[str] = field(
         default_factory=list
     )  # event class names from pre-tick setup phase
@@ -93,6 +89,7 @@ class ReplayRecorder:
             start_utc_iso=simulator.utc_time.isoformat(),
             tick_secs=simulator.tick_secs,
             env_settings=dict(env_settings or {}),
+            experiment_metadata=dict(getattr(simulator, "replay_metadata", {})),
         )
 
     def record_setup_phase(self, simulator: Any) -> None:
@@ -143,6 +140,7 @@ class ReplayRecorder:
             "start_utc_iso": self._log.start_utc_iso,
             "tick_secs": self._log.tick_secs,
             "env_settings": self._log.env_settings,
+            "experiment_metadata": self._log.experiment_metadata,
             "setup_events": self._log.setup_events,
             "ticks": [
                 {
@@ -172,6 +170,7 @@ class ReplayRecorder:
             start_utc_iso=raw.get("start_utc_iso", ""),
             tick_secs=raw.get("tick_secs", 1.0),
             env_settings=raw.get("env_settings", {}),
+            experiment_metadata=raw.get("experiment_metadata", {}),
         )
         log.setup_events = raw.get("setup_events", [])
         for t in raw.get("ticks", []):

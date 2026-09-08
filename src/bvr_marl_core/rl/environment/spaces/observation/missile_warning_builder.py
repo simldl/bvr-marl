@@ -11,9 +11,11 @@ Uses ObservationHelper and MissileWarner system for consistency with BT.
 
 import numpy as np
 
+from bvr_marl_core.domain.information_mode import InformationMode, resolve_information_mode
+from bvr_marl_core.domain.tactical_contact import TacticalContact
+from bvr_marl_core.rl.environment.spaces.observation.constants import WARN_FEATURE_DIM
+from bvr_marl_core.rl.environment.spaces.observation.helpers import pad_tokens
 from bvr_marl_core.tactical import ObservationHelper
-
-from .helpers import pad_generic
 
 
 class MissileWarningBuilder:
@@ -22,6 +24,9 @@ class MissileWarningBuilder:
     def __init__(self, simulator, config):
         self.simulator = simulator
         self.config = config
+        self.information_mode = resolve_information_mode(
+            getattr(config, "information_mode", None), default=InformationMode.SENSOR_LIMITED
+        )
         # Cache ObservationHelpers per agent (created lazily)
         self._obs_helpers = {}
 
@@ -31,32 +36,29 @@ class MissileWarningBuilder:
             self._obs_helpers[unit.id] = ObservationHelper(unit)
         return self._obs_helpers[unit.id]
 
-    def build(self, unit) -> tuple[float, np.ndarray, np.ndarray]:
+    def build(self, unit) -> np.ndarray:
         """
-        Build missile warning observations.
+        Build missile-warning tokens.
 
         Uses ObservationHelper.get_threat_warnings() for consistency with BT.
-        Encodes warnings as threat level + sector one-hot encoding.
+        Each warning is a token [urgency, sin(bearing), cos(bearing), mask]; the
+        mask column (and the attention over these tokens) makes the old scalar
+        "warning count" flag redundant, so it is no longer emitted.
 
         Args:
             unit: The unit to build warnings for
 
         Returns:
-            tuple of 3 elements:
-            - warning_flag: Normalized count of warnings [0-1]
-            - warning_dirs: Threat level + sector encoding [em_slots * (1 + warn_sectors)]
-            - warning_mask: Validity mask [em_slots]
+            warn_tokens: [em_slots, WARN_FEATURE_DIM + 1] with mask in the last column
         """
+        if self.information_mode is InformationMode.SENSOR_LIMITED:
+            return self._build_from_warning_and_track_estimates(unit)
+
         obs_helper = self._get_obs_helper(unit)
 
         # Get threat warnings from helper (same source as BT)
         threat_data = obs_helper.get_threat_warnings()
-        num_warnings = threat_data.get("num_warnings", 0)
         warning_ids = threat_data.get("warning_ids", [])
-
-        # Normalize warning count
-        count = min(num_warnings, self.config.em_slots)
-        count_norm = count / np.float32(self.config.em_slots) if self.config.em_slots > 0 else 0.0
 
         # Build sector-based warning info
         info_list = []
@@ -73,27 +75,72 @@ class MissileWarningBuilder:
                 # closing) from range + closing rate, so the policy can learn the
                 # timing of a last-ditch break rather than only its direction.
                 tnorm = self._threat_urgency(unit, missile)
-                # Calculate bearing to missile in own reference frame (compass-from-North)
+                # Bearing to the missile relative to own nose, encoded as
+                # (sin, cos) so it is continuous across the 0/360 wraparound —
+                # more compact and learnable than the old N-way sector one-hot.
                 dE = (
                     (missile.position.lon - unit.position.lon)
                     * 111_000.0
                     * np.cos(np.radians(unit.position.lat))
                 )
                 dN = (missile.position.lat - unit.position.lat) * 111_000.0
-                bearing_compass = (np.degrees(np.arctan2(dE, dN)) - unit.yaw_deg) % 360.0
-                sector = int(bearing_compass // (360.0 / self.config.warn_sectors))
-                sector = min(max(sector, 0), self.config.warn_sectors - 1)
-                one_hot = [0.0] * self.config.warn_sectors
-                one_hot[sector] = 1.0
-                info_list.append([tnorm] + one_hot)
+                bearing_rad = np.radians(np.degrees(np.arctan2(dE, dN)) - unit.yaw_deg)
+                info_list.append([tnorm, float(np.sin(bearing_rad)), float(np.cos(bearing_rad))])
             else:
                 # Warning ID but missile not found - maybe just died
-                info_list.append([0.0] + [0.0] * self.config.warn_sectors)
+                info_list.append([0.0, 0.0, 0.0])
 
-        dim = 1 + self.config.warn_sectors
-        info_arr, info_mask = pad_generic(info_list, self.config.em_slots, dim)
+        return pad_tokens(info_list, self.config.em_slots, WARN_FEATURE_DIM)
 
-        return count_norm, info_arr.flatten(), info_mask
+    def _build_from_warning_and_track_estimates(self, unit) -> np.ndarray:
+        """Build warnings without resolving warning IDs through simulator truth."""
+        sensor = getattr(unit, "sensor", None)
+        warner = getattr(sensor, "missile_warner", None)
+        warning_ids = (
+            list(warner.get_current_warning_ids())
+            if warner is not None and hasattr(warner, "get_current_warning_ids")
+            else []
+        )
+        if not warning_ids:
+            return pad_tokens([], self.config.em_slots, WARN_FEATURE_DIM)
+
+        contacts = []
+        converter = getattr(sensor, "tactical_contact", TacticalContact.from_track_snapshot)
+        for track in getattr(sensor, "sensor_tracks", ()) or ():
+            contact = converter(track)
+            if contact.is_missile and not contact.suspect_deception:
+                contacts.append(contact)
+        contacts.sort(key=lambda contact: str(contact.track_id))
+
+        info_list = [self._contact_warning_features(unit, contact) for contact in contacts]
+        # The current warning model exposes only IDs when no radar track exists.
+        # Preserve the warning itself without inventing a truth-derived bearing.
+        missing = max(0, len(warning_ids) - len(info_list))
+        info_list.extend([[1.0, 0.0, 0.0]] * missing)
+        return pad_tokens(info_list[: len(warning_ids)], self.config.em_slots, WARN_FEATURE_DIM)
+
+    def _contact_warning_features(self, unit, contact: TacticalContact) -> list[float]:
+        d_east, d_north, d_up, missile_vx, missile_vy, missile_vz = contact.state
+        bearing_rad = np.arctan2(d_east, d_north) - np.radians(float(unit.yaw_deg))
+        own_vx, own_vy, own_vz = self._vel_xyz(getattr(unit, "velocity", None))
+        distance = float(np.sqrt(d_east**2 + d_north**2 + d_up**2))
+        if distance < 1e-6:
+            urgency = 1.0
+        else:
+            closing = (
+                -(
+                    (missile_vx - own_vx) * d_east
+                    + (missile_vy - own_vy) * d_north
+                    + (missile_vz - own_vz) * d_up
+                )
+                / distance
+            )
+            urgency = (
+                0.0
+                if closing <= 0.0
+                else float(np.clip(1.0 - distance / closing / self._TTI_HORIZON_S, 0.0, 1.0))
+            )
+        return [urgency, float(np.sin(bearing_rad)), float(np.cos(bearing_rad))]
 
     @staticmethod
     def _vel_xyz(v) -> tuple[float, float, float]:

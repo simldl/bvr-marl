@@ -94,6 +94,7 @@ class FlyingPhysics(BasePhysics):
         dt,
         throttle=1.0,
         use_sustained=False,
+        omega_max_deg_s=None,
     ) -> tuple[float, float]:
         """
         Update yaw using physics-based turn rate modeling.
@@ -106,6 +107,10 @@ class FlyingPhysics(BasePhysics):
             dt: Time step (s)
             throttle: Throttle setting [0,1] (for sustained turn rate)
             use_sustained: If True, use sustained turn rate; if False, use instantaneous
+            omega_max_deg_s: Turn-rate cap supplied by the inner-loop autopilot.
+                When given it REPLACES the locally recomputed cap, so a command
+                that has already been rate-limited upstream is not limited a
+                second time against a different (envelope-unaware) envelope.
 
         Returns:
             tuple of (new_yaw_deg, omega_rad)
@@ -113,8 +118,10 @@ class FlyingPhysics(BasePhysics):
         if speed_mps < 1e-3:
             return yaw_deg, 0.0
 
+        if omega_max_deg_s is not None:
+            omega_max_deg = max(0.0, float(omega_max_deg_s))
         # Use physics-based turn rate calculation if available (for AircraftPhysics)
-        if hasattr(self, "compute_instantaneous_turn_rate") and hasattr(
+        elif hasattr(self, "compute_instantaneous_turn_rate") and hasattr(
             self, "compute_sustained_turn_rate"
         ):
             if use_sustained:
@@ -305,11 +312,14 @@ class FlyingPhysics(BasePhysics):
         desired_yaw_deg: float,
         speed_mps: float,
         dt: float,
+        omega_max_deg_s: float | None = None,
     ) -> tuple[float, float, float]:
         # update_pitch_deg already applies get_pitch_limit_deg (ceiling taper + 60° hard cap)
         # and _ground_proximity_pitch_floor internally, so no pre-clip needed here.
         pitch_deg = self.update_pitch_deg(pitch_deg, desired_pitch_deg, speed_mps, dt, pos)
-        yaw_deg, omega_rad = self.update_yaw_deg(pos, yaw_deg, desired_yaw_deg, speed_mps, dt)
+        yaw_deg, omega_rad = self.update_yaw_deg(
+            pos, yaw_deg, desired_yaw_deg, speed_mps, dt, omega_max_deg_s=omega_max_deg_s
+        )
         return pitch_deg, yaw_deg, omega_rad
 
     def _compute_motion_vectors(
@@ -366,7 +376,22 @@ class FlyingPhysics(BasePhysics):
         speed_mps: float,
         throttle: float,
         dt: float,
+        omega_max_deg_s: float | None = None,
+        roll_deg_override: float | None = None,
     ) -> tuple[float, float, float, float, float, float, float]:
+        """Integrate one step of flight.
+
+        Args:
+            omega_max_deg_s: Turn-rate cap from the inner-loop autopilot. When
+                supplied, the command has already been rate-limited upstream and
+                this layer follows it instead of imposing a second, different cap.
+            roll_deg_override: The bank angle the autopilot is actually holding.
+                When supplied it is returned verbatim, because bank is then a
+                real state with its own rate limit. Only when it is absent does
+                this layer fall back to inverting a bank angle back out of the
+                achieved turn rate -- a display-only quantity that silently
+                disagrees with the commanded bank whenever a limiter binds.
+        """
 
         # Advance internal time for stall helpers
         self._elapsed_time_s += dt
@@ -375,12 +400,19 @@ class FlyingPhysics(BasePhysics):
         if hasattr(self, "afterburner") and self.afterburner is not None:
             try:
                 self.afterburner.update_spool(dt, speed_mps, pos.alt)
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
 
         # 1) Apply ceiling taper + global cap and yaw/pitch slews (existing logic)
         pitch_deg, yaw_deg, omega_rad = self._update_orientation(
-            pos, pitch_deg, desired_pitch_deg, yaw_deg, desired_hdg_deg, speed_mps, dt
+            pos,
+            pitch_deg,
+            desired_pitch_deg,
+            yaw_deg,
+            desired_hdg_deg,
+            speed_mps,
+            dt,
+            omega_max_deg_s=omega_max_deg_s,
         )
 
         # Load factor from commanded turn rate (for kinematics)
@@ -484,7 +516,12 @@ class FlyingPhysics(BasePhysics):
 
             v_new_mps = min(v_new_mps, V_ne_mach, V_ne_qbar)
 
-        # 5) Roll from turn rate & pitch (existing)
-        roll_deg = self.update_roll(v_new_mps, omega_rad, pitch_deg)
+        # 5) Roll. Under the lift-vector autopilot bank is a rate-limited state
+        # and is passed straight through; the legacy desired-heading path still
+        # infers it from the achieved turn rate.
+        if roll_deg_override is not None:
+            roll_deg = float(roll_deg_override)
+        else:
+            roll_deg = self.update_roll(v_new_mps, omega_rad, pitch_deg)
 
         return lat2, lon2, alt2, v_new_mps, yaw_deg, pitch_deg, roll_deg

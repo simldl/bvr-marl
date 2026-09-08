@@ -6,7 +6,7 @@ Imports from the new modular structure.
 import logging
 
 # Import from new modular structure
-from .action_space import (
+from bvr_marl_core.rl.environment.spaces.action_space import (
     ActionProcessor,
     ActionSpaceManager,
     EnergyLiftVectorActionProcessor,

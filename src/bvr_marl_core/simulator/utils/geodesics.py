@@ -4,9 +4,50 @@ Geodesics computations
 
 import math
 
+import numpy as np
 from geographiclib.geodesic import Geodesic
 
 from bvr_marl_core.simulator.utils.angles import normalize_angle
+
+# WGS84 constants for geodetic<->ECEF<->ENU transforms.
+_WGS84_A = 6378137.0
+_WGS84_F = 1 / 298.257223563
+_WGS84_B = _WGS84_A * (1 - _WGS84_F)
+_WGS84_E_SQ = _WGS84_F * (2 - _WGS84_F)
+_WGS84_B2_OVER_A2 = (_WGS84_B * _WGS84_B) / (_WGS84_A * _WGS84_A)  # == 1 - e_sq
+
+
+def geodetic_to_ecef_scalar(lat: float, lon: float, alt: float) -> tuple[float, float, float]:
+    """Convert geodetic lat/lon/alt (deg, m) to ECEF x/y/z (m)."""
+    lat_rad = math.radians(lat)
+    lon_rad = math.radians(lon)
+    sin_lat = math.sin(lat_rad)
+    cos_lat = math.cos(lat_rad)
+    n = _WGS84_A / math.sqrt(1.0 - _WGS84_E_SQ * sin_lat * sin_lat)
+    x = (n + alt) * cos_lat * math.cos(lon_rad)
+    y = (n + alt) * cos_lat * math.sin(lon_rad)
+    z = (_WGS84_B2_OVER_A2 * n + alt) * sin_lat
+    return x, y, z
+
+
+def geodetic_to_enu(
+    lat: float, lon: float, alt: float, ref_lat: float, ref_lon: float, ref_alt: float
+) -> np.ndarray:
+    """Convert geodetic lat/lon/alt to local ENU (east, north, up) about a reference."""
+    x, y, z = geodetic_to_ecef_scalar(lat, lon, alt)
+    xr, yr, zr = geodetic_to_ecef_scalar(ref_lat, ref_lon, ref_alt)
+    dx, dy, dz = x - xr, y - yr, z - zr
+
+    lat0 = math.radians(ref_lat)
+    lon0 = math.radians(ref_lon)
+    sin_lat0, cos_lat0 = math.sin(lat0), math.cos(lat0)
+    sin_lon0, cos_lon0 = math.sin(lon0), math.cos(lon0)
+
+    e = -sin_lon0 * dx + cos_lon0 * dy
+    n = -sin_lat0 * cos_lon0 * dx - sin_lat0 * sin_lon0 * dy + cos_lat0 * dz
+    u = cos_lat0 * cos_lon0 * dx + cos_lat0 * sin_lon0 * dy + sin_lat0 * dz
+    return np.array((e, n, u))
+
 
 # Flat-earth bearing formula (midpoint cosine approximation) is accurate to:
 #   100 km → <0.05° bearing error,  150 km → <0.1° error — well within DLZ/SQI tolerances.
@@ -88,6 +129,16 @@ def clear_bearing_cache():
     _bearing_cache = {}
 
 
+# WGS84 constants for the local-curvature fast path in geodetic_direct.
+_WGS84_A = 6378137.0
+_WGS84_E_SQ = (1 / 298.257223563) * (2 - 1 / 298.257223563)
+
+# For steps below this length the local-radii step formula differs from the exact
+# geodesic by at most a few centimeters (error grows ~quadratically with step
+# length); per-tick movement steps are a few hundred meters.
+_DIRECT_FAST_PATH_M = 2000.0
+
+
 def geodetic_direct(
     lat: float,
     lon: float,
@@ -96,6 +147,21 @@ def geodetic_direct(
     distance: float,
     vertical_distance: float = 0,
 ) -> tuple[float, float, float]:
+    if abs(distance) < _DIRECT_FAST_PATH_M:
+        # Local-curvature step: meridian radius M for latitude, prime-vertical
+        # radius N for longitude. Centimeter-scale error at these step lengths.
+        lat_rad = math.radians(lat)
+        sin_lat = math.sin(lat_rad)
+        w_sq = 1.0 - _WGS84_E_SQ * sin_lat * sin_lat
+        w = math.sqrt(w_sq)
+        m_radius = _WGS84_A * (1.0 - _WGS84_E_SQ) / (w_sq * w)  # meridian radius
+        n_radius = _WGS84_A / w  # prime vertical radius
+
+        yaw_rad = math.radians(yaw_deg)
+        lat2 = lat + math.degrees(distance * math.cos(yaw_rad) / m_radius)
+        lon2 = lon + math.degrees(distance * math.sin(yaw_rad) / (n_radius * math.cos(lat_rad)))
+        return lat2, lon2, alt + vertical_distance
+
     d = Geodesic.WGS84.Direct(
         lat, lon, yaw_deg, distance, outmask=Geodesic.LATITUDE | Geodesic.LONGITUDE
     )

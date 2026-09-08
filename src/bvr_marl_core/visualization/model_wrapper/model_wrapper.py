@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from bvr_marl_core.visualization.model_wrapper.inference_output import deterministic_actions
 from bvr_marl_core.visualization.model_wrapper.policy_selection import resolve_policy_id
 
 
@@ -21,7 +22,6 @@ class TrainedModelWrapper:
 
     def __init__(self, checkpoint_path, env, model_config_path=None, train_config=None):
         import logging
-        import os
         from pathlib import Path
 
         import ray
@@ -126,52 +126,7 @@ class TrainedModelWrapper:
         batch = {Columns.OBS: obs_batch}
         output = policy_module.forward_inference(batch)
 
-        # Extract action from output
-        # Use RLlib's Columns constants for accessing output
-        from ray.rllib.core.columns import Columns
-
-        # Try different output formats
-        if Columns.ACTIONS in output:
-            # Standard RLlib actions column
-            # For stateful models with LSTM, actions have shape (batch, time, action_dim)
-            # We need to extract [0, 0] or squeeze to get (action_dim,)
-            actions = output[Columns.ACTIONS]
-            # Handle both (batch, action_dim) and (batch, time, action_dim) shapes
-            if actions.dim() == 3:
-                actions = actions[0, 0]  # Remove batch and time dimensions
-            else:
-                actions = actions[0]  # Remove batch dimension only
-        elif "actions" in output:
-            # Fallback: lowercase actions
-            actions = output["actions"]
-            if actions.dim() == 3:
-                actions = actions[0, 0]
-            else:
-                actions = actions[0]
-        elif Columns.ACTION_DIST_INPUTS in output:
-            # Distribution parameters - extract means
-            action_dist_inputs = output[Columns.ACTION_DIST_INPUTS]
-            # Handle both (batch, dist_params) and (batch, time, dist_params) shapes
-            if action_dist_inputs.dim() == 3:
-                action_dist_inputs = action_dist_inputs[0, 0]
-            else:
-                action_dist_inputs = action_dist_inputs[0]
-            # Extract just the means (first half) for deterministic behavior
-            action_dim = action_dist_inputs.shape[0] // 2
-            actions = action_dist_inputs[:action_dim]
-        elif "action_dist_inputs" in output:
-            # Fallback: lowercase
-            action_dist_inputs = output["action_dist_inputs"]
-            if action_dist_inputs.dim() == 3:
-                action_dist_inputs = action_dist_inputs[0, 0]
-            else:
-                action_dist_inputs = action_dist_inputs[0]
-            action_dim = action_dist_inputs.shape[0] // 2
-            actions = action_dist_inputs[:action_dim]
-        else:
-            raise ValueError(
-                f"Unexpected output format from forward_inference. Keys: {list(output.keys())}"
-            )
+        actions = deterministic_actions(output, Columns)
 
         # Convert from torch tensor to numpy if needed
         if hasattr(actions, "cpu"):
@@ -179,8 +134,7 @@ class TrainedModelWrapper:
         elif hasattr(actions, "numpy"):
             actions = actions.numpy()
 
-        # CRITICAL: Clip actions to [0,1] to match training behavior
-        # The action processor expects normalized inputs in energy space mode
+        # The action processor expects normalized inputs in energy-space mode.
         actions = np.clip(actions, 0.0, 1.0)
 
         return actions

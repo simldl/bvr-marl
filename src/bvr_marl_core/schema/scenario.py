@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from .base import NestedModel, VersionedModel
+from bvr_marl_core.schema.base import NestedModel, VersionedModel
 
 
 class SensorConfig(NestedModel):

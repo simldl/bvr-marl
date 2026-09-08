@@ -291,6 +291,26 @@ def test_position_clamping_integration(control_system):
     assert aircraft.removal_reason == "boundary_violation"
 
 
+def test_keep_inside_boundary_units_clamp_lat_lon_without_boundary_death(control_system):
+    """Scripted boundary-kept units should stay inside the combat box."""
+    control = control_system
+    aircraft = control.parent
+    aircraft.keep_inside_boundary = True
+    aircraft.boundary_violation_active = True
+    aircraft.boundary_violation_countdown = 3
+    aircraft.removal_reason = "boundary_violation"
+    aircraft.position.lat = 95
+    aircraft.position.lon = 185
+
+    control.update_movement(0.1)
+
+    assert aircraft.position.lat == aircraft.map_limits.top_lat
+    assert aircraft.position.lon == aircraft.map_limits.right_lon
+    assert aircraft.boundary_violation_active is False
+    assert aircraft.boundary_violation_countdown == 0
+    assert aircraft.removal_reason is None
+
+
 # ============================================================================
 # CONTROL SYSTEM BEHAVIOR TESTS
 # ============================================================================

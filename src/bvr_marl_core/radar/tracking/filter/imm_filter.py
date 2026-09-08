@@ -1,7 +1,4 @@
-import math
-
 import numpy as np
-from numpy.linalg import det
 
 from bvr_marl_core.radar.tracking.filter.base_filter import BaseKFFilter
 
@@ -19,9 +16,18 @@ class IMMFilter(BaseKFFilter):
         mode_probabilities: list[float],
         measurement_cov: np.ndarray,
     ):
+        if not filters:
+            raise ValueError("IMM requires at least one component filter.")
         self.filters = filters
-        self.PI = transition_matrix.astype(float).copy()
+        self.PI = np.asarray(transition_matrix, dtype=float).copy()
+        model_count = len(filters)
+        if self.PI.shape != (model_count, model_count):
+            raise ValueError("IMM transition matrix must be square with one row per model.")
+        if np.any(self.PI < 0.0) or not np.allclose(self.PI.sum(axis=1), 1.0):
+            raise ValueError("IMM transition rows must be nonnegative and sum to one.")
         self.mu = np.array(mode_probabilities, dtype=float)
+        if self.mu.shape != (model_count,) or np.any(self.mu < 0.0):
+            raise ValueError("IMM mode probabilities must be nonnegative and match the models.")
         self.mu = self.mu / max(1e-12, np.sum(self.mu))
         self.R = measurement_cov.astype(float).copy()
 
@@ -32,22 +38,16 @@ class IMMFilter(BaseKFFilter):
         c = np.where(c <= 0.0, 1e-9, c)
         mixing = (self.PI * self.mu[:, None]) / c[None, :]
 
+        states = np.stack([model.get_state() for model in self.filters])
+        covariances = np.stack([model.get_covariance() for model in self.filters])
+
         for j in range(M):
-            # Compute mixed mean (always in 6D format)
-            xj = np.zeros(6)
-            Pj = np.zeros((6, 6))
-
-            for i in range(M):
-                xi = self.filters[i].get_state()  # Always returns 6D
-                Pi = self.filters[i].get_covariance()  # Always returns 6x6
-                xj += mixing[i, j] * xi
-
-            # Compute mixed covariance
-            for i in range(M):
-                xi = self.filters[i].get_state()
-                Pi = self.filters[i].get_covariance()
-                d = (xi - xj).reshape(-1, 1)
-                Pj += mixing[i, j] * (Pi + d @ d.T)
+            weights = mixing[:, j]
+            xj = np.einsum("i,ij->j", weights, states)
+            deltas = states - xj
+            Pj = np.einsum("i,ijk->jk", weights, covariances) + np.einsum(
+                "i,ij,ik->jk", weights, deltas, deltas
+            )
 
             # Set state using 6D format (filters handle internal conversion)
             self.filters[j].set_state(xj, Pj)
@@ -58,33 +58,31 @@ class IMMFilter(BaseKFFilter):
         for f in self.filters:
             f.predict(dt)
 
-    def _likelihood(self, f: BaseKFFilter, z: np.ndarray) -> float:
-        """Compute likelihood of measurement z given filter f."""
+    def _log_likelihood(self, f: BaseKFFilter, z: np.ndarray) -> float:
+        """Compute a stable log likelihood of measurement ``z`` for one mode."""
         x = f.get_state()
         y = z.reshape(3) - x[:3]  # Innovation (position only)
         S = f.get_covariance()[:3, :3] + self.R  # Innovation covariance
 
         try:
-            S_inv = np.linalg.inv(S)
-            expo = -0.5 * (y.T @ S_inv @ y)
-            denom = math.sqrt(((2 * math.pi) ** 3) * max(1e-12, det(S)))
-            return float(math.exp(expo) / max(1e-12, denom))
+            sign, log_determinant = np.linalg.slogdet(S)
+            if sign <= 0.0:
+                return float("-inf")
+            nis = float(y @ np.linalg.solve(S, y))
+            return -0.5 * (3.0 * np.log(2.0 * np.pi) + log_determinant + nis)
         except np.linalg.LinAlgError:
-            return 1e-12
+            return float("-inf")
 
     def update(self, z: np.ndarray):
         """Update step with mode probability updates."""
-        # Compute likelihoods
-        lik = np.array([self._likelihood(f, z) for f in self.filters], dtype=float)
-
-        # Update mode probabilities
         c = self.PI.T @ self.mu
-        post = lik * c
-        s = float(np.sum(post))
-
-        if s > 0:
-            self.mu = post / s
-        # else keep previous probabilities
+        log_post = np.asarray(
+            [self._log_likelihood(f, z) for f in self.filters], dtype=float
+        ) + np.log(np.maximum(c, 1e-300))
+        maximum = float(np.max(log_post))
+        if np.isfinite(maximum):
+            posterior = np.exp(log_post - maximum)
+            self.mu = posterior / posterior.sum()
 
         # Update all filters
         for f in self.filters:
@@ -120,6 +118,16 @@ class IMMFilter(BaseKFFilter):
         """Set state for all filters."""
         for f in self.filters:
             f.set_state(x, P)
+
+    def set_measurement_covariance(self, covariance: np.ndarray):
+        value = np.asarray(covariance, dtype=float)
+        self.R = value.copy()
+        for model in self.filters:
+            model.set_measurement_covariance(value)
+
+    def set_measurement_std(self, std_xyz: tuple[float, float, float]):
+        values = np.asarray(std_xyz, dtype=float)
+        self.set_measurement_covariance(np.diag(values * values))
 
     def get_last_update_stats(self) -> dict:
         """Return update stats from the dominant (highest-probability) mode."""

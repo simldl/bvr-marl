@@ -22,16 +22,8 @@ from bvr_marl_core.analysis.plotting.plot_tensorboard_metric import (
     labels_for_tag,
     normalize_tag,
     plot_metric,
-)
-
-# Rendering helpers shared with the GUI plot exporter. Underscore-prefixed in the
-# implementation module, re-exported here under their original names because the
-# exporter builds figures with them directly.
-from bvr_marl_core.analysis.plotting.plot_tensorboard_metric import (
-    _run_color_map as run_color_map,
-)
-from bvr_marl_core.analysis.plotting.plot_tensorboard_metric import (
-    _smooth as smooth_series,
+    run_color_map,
+    smooth_series,
 )
 from bvr_marl_core.analysis.plotting.plot_training_dashboard import (
     DASHBOARD_TAGS,

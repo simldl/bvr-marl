@@ -12,11 +12,19 @@ specialized builders for different observation components:
 
 import numpy as np
 
-from .enemy_info_builder import EnemyInfoBuilder
-from .friendly_info_builder import FriendlyInfoBuilder
-from .missile_warning_builder import MissileWarningBuilder
-from .own_state_builder import OwnStateBuilder
-from .passive_radar_builder import PassiveRadarBuilder
+from bvr_marl_core.domain.information_mode import InformationMode, resolve_information_mode
+from bvr_marl_core.domain.truth_access_guard import forbidden_truth_access
+from bvr_marl_core.rl.environment.spaces.observation.enemy_info_builder import EnemyInfoBuilder
+from bvr_marl_core.rl.environment.spaces.observation.friendly_info_builder import (
+    FriendlyInfoBuilder,
+)
+from bvr_marl_core.rl.environment.spaces.observation.missile_warning_builder import (
+    MissileWarningBuilder,
+)
+from bvr_marl_core.rl.environment.spaces.observation.own_state_builder import OwnStateBuilder
+from bvr_marl_core.rl.environment.spaces.observation.passive_radar_builder import (
+    PassiveRadarBuilder,
+)
 
 
 class ObservationBuilder:
@@ -25,7 +33,13 @@ class ObservationBuilder:
 
     This class maintains the same interface as the original monolithic builder
     but delegates to specialized sub-builders for each observation component.
+
+    ``enemy_builder_class`` is the extension point for widening the enemy-fighter
+    token: a subclass may point it at an ``EnemyInfoBuilder`` subclass that appends
+    extra columns. The env config must declare the matching ``ef_extra_dim``.
     """
+
+    enemy_builder_class = EnemyInfoBuilder
 
     def __init__(self, simulator, agent_ids: list[str], config):
         """
@@ -55,9 +69,16 @@ class ObservationBuilder:
             object.__setattr__(config, "all_agent_ids", tuple(agent_ids))
 
         # Initialize sub-builders
+        self._sensor_limited = (
+            resolve_information_mode(
+                getattr(config, "information_mode", None),
+                default=InformationMode.SENSOR_LIMITED,
+            )
+            is InformationMode.SENSOR_LIMITED
+        )
         self.own_state_builder = OwnStateBuilder(simulator, config)
         self.friendly_builder = FriendlyInfoBuilder(simulator, config)
-        self.enemy_builder = EnemyInfoBuilder(simulator, config)
+        self.enemy_builder = self.enemy_builder_class(simulator, config)
         self.missile_warning_builder = MissileWarningBuilder(simulator, config)
         self.passive_radar_builder = PassiveRadarBuilder(simulator, config)
 
@@ -67,76 +88,49 @@ class ObservationBuilder:
 
         Delegates to sub-builders and assembles the complete observation dict.
 
-        Updated structure:
-        - NEZ features are now embedded in enemy_fighters (no separate arrays)
-        - Friendly missiles include phase and seeker lock
-        - Enemy missiles include TTI
+        Structure (all entity blocks are self-contained tokens whose last column
+        is a validity mask; relations/warnings are folded into their tokens):
+        - own_state:         own-state vector (d_OWN,)
+        - friendly_missiles: [fm_slots * d_FM]  (incl. target relation + mask)
+        - friendly_fighters: [ff_slots * d_FF]  (incl. lock relation + mask)
+        - enemy_missiles:    [em_slots * d_EM]  (incl. TTI + mask)
+        - enemy_fighters:    [ef_slots * d_EF]  (incl. NEZ/DLZ/RID/BDA + mask)
+        - missile_warnings:  [em_slots * d_MWS] (incl. mask)
+        - passive_radar:     [pr_slots * d_PR]  (incl. mask)
 
         Args:
             agent_id: The agent ID to build observations for
 
         Returns:
-            Dictionary of observation arrays with keys:
-            - own_state: Own state vector (21 dims)
-            - friendly_missiles, mask_friendly_missiles: Friendly missile states (8 dims/slot)
-            - friendly_fighters, mask_friendly_fighters: Friendly fighter states (6 dims/slot)
-            - fm_target_indices, mask_fm_targets: Missile target indices
-            - ff_lock_indices, mask_ff_locks: Fighter lock indices
-            - enemy_missiles, mask_enemy_missiles: Enemy missile states (7 dims/slot)
-            - enemy_fighters, mask_enemy_fighters: Enemy fighter states (9 dims/slot, includes NEZ)
-            - missile_warning_flag: Warning count normalized
-            - missile_warning_dirs, mask_warning_dirs: Warning directions
-            - passive_radar, mask_passive_radar: Passive radar detections
+            Dictionary of flattened observation arrays.
         """
+        if self._sensor_limited:
+            # Runtime firewall trip-wire: any track-identity -> truth-entity
+            # resolution inside a sensor-limited observation build raises
+            # (see domain.truth_access_guard). Own-state access is unaffected.
+            with forbidden_truth_access("sensor_limited_observation"):
+                return self._build(agent_id)
+        return self._build(agent_id)
+
+    def _build(self, agent_id: str) -> dict[str, np.ndarray]:
         unit = self.simulator.active_units[agent_id]
         obs: dict[str, np.ndarray] = {}
 
-        # Build own state
+        # Own state
         obs["own_state"] = self.own_state_builder.build(unit)
 
-        # Build friendly info
-        fm_s, fm_m, ff_s, ff_m, fm_t, fm_t_m, ff_l, ff_l_m = self.friendly_builder.build(agent_id)
-        obs.update(
-            {
-                "friendly_missiles": fm_s.ravel(),
-                "mask_friendly_missiles": fm_m,
-                "friendly_fighters": ff_s.ravel(),
-                "mask_friendly_fighters": ff_m,
-                "fm_target_indices": fm_t,
-                "mask_fm_targets": fm_t_m,
-                "ff_lock_indices": ff_l,
-                "mask_ff_locks": ff_l_m,
-            }
-        )
+        # Friendly tokens (target/lock relation + mask folded in)
+        fm_tokens, ff_tokens = self.friendly_builder.build(agent_id)
+        obs["friendly_missiles"] = fm_tokens.ravel()
+        obs["friendly_fighters"] = ff_tokens.ravel()
 
-        # Build enemy info (NEZ now embedded in ef_s, no separate arrays)
-        em_s, em_m, ef_s, ef_m = self.enemy_builder.build(agent_id)
-        obs.update(
-            {
-                "enemy_missiles": em_s.ravel(),
-                "mask_enemy_missiles": em_m,
-                "enemy_fighters": ef_s.ravel(),
-                "mask_enemy_fighters": ef_m,
-            }
-        )
+        # Enemy tokens (mask folded in)
+        em_tokens, ef_tokens = self.enemy_builder.build(agent_id)
+        obs["enemy_missiles"] = em_tokens.ravel()
+        obs["enemy_fighters"] = ef_tokens.ravel()
 
-        # Build missile warnings
-        flag, dirs, dirs_m = self.missile_warning_builder.build(unit)
-        obs.update(
-            {
-                "missile_warning_flag": np.array([flag], np.float32),
-                "missile_warning_dirs": dirs,
-                "mask_warning_dirs": dirs_m,
-            }
-        )
-
-        # Build passive radar
-        pr, pr_m = self.passive_radar_builder.build(unit)
-        obs.update(
-            {
-                "passive_radar": pr.ravel(),
-                "mask_passive_radar": pr_m,
-            }
-        )
+        # Threat/ESM tokens (mask folded in)
+        obs["missile_warnings"] = self.missile_warning_builder.build(unit).ravel()
+        obs["passive_radar"] = self.passive_radar_builder.build(unit).ravel()
 
         return obs

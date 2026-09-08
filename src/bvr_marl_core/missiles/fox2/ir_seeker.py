@@ -1,5 +1,6 @@
 import numpy as np
 
+from bvr_marl_core.missiles.core.tracker_info import build_tracker_info
 from bvr_marl_core.simulator.utils.angles import signed_yaw_deg_diff
 from bvr_marl_core.simulator.utils.geodesics import geodetic_bearing_deg
 
@@ -79,14 +80,7 @@ class InfraredSeeker:
         return float(np.sqrt(dx * dx + dy * dy + dz * dz))
 
     def _update_tracker_info(self, target):
-        self._tracker_info = {
-            "position": [target.position.lat, target.position.lon, target.position.alt],
-            "velocity": [
-                getattr(target, "velocity_x", 0.0),
-                getattr(target, "velocity_y", 0.0),
-                getattr(target, "velocity_z", 0.0),
-            ],
-        }
+        self._tracker_info = build_tracker_info(target)
 
     def get_locked_target(self):
         return getattr(self.locked_target, "id", None) if self.locked_target else None

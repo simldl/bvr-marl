@@ -22,7 +22,6 @@ os.environ["OMP_NUM_THREADS"] = "1"
 
 def _load_env(config_name: str):
     """Load config and create environment, returning (env, agent_ids)."""
-    from pathlib import Path
 
     from bvr_marl_core.rl.utils import create_env_creator
     from bvr_marl_core.utils import load_config

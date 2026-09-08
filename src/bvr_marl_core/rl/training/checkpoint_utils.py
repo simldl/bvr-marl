@@ -1,7 +1,6 @@
 """Checkpoint loading and restoration utilities."""
 
 import os
-from typing import Optional
 
 
 def resolve_checkpoint_path(checkpoint_path: str, project_root: str) -> str:

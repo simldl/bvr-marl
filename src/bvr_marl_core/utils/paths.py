@@ -30,7 +30,7 @@ def core_root() -> Path:
 
 
 def core_project_root() -> Path:
-    """Root of the bvr-marl-core repository (contains pyproject.toml).
+    """Root of the bvr-marl repository (contains pyproject.toml).
 
     For an editable install the package lives at
     ``<repo_root>/src/bvr_marl_core/``, so this walks two levels up from
@@ -46,7 +46,7 @@ def core_project_root() -> Path:
 def sibling_model_roots() -> list[Path]:
     """Additional model roots contributed by sibling extension repositories.
 
-    Extension packages are commonly checked out next to bvr-marl-core.  Any
+    Extension packages are commonly checked out next to bvr-marl.  Any
     sibling directory that contains a ``models/`` subdirectory is treated as an
     extra model root so GUI checkpoint pickers can discover their runs.  Extra
     roots may also be supplied explicitly via the ``BVR_MODEL_ROOTS``
@@ -67,7 +67,7 @@ def sibling_model_roots() -> list[Path]:
             candidate = sibling / "models"
             if candidate.is_dir():
                 roots.append(candidate)
-    except Exception:
+    except OSError:
         pass
 
     return roots
@@ -145,7 +145,7 @@ def exported_plots_root() -> Path:
     Resolution order:
     1. ``BVR_EXPORTED_PLOTS_DIR`` environment variable.
     2. ``<workspace_root>/exported_plots/`` — the sibling of the repo root
-       (e.g. ``Code/exported_plots`` when the repo lives at ``Code/bvr-marl-core``).
+       (e.g. ``Code/exported_plots`` when the repo lives at ``Code/bvr-marl``).
     """
     env = os.environ.get("BVR_EXPORTED_PLOTS_DIR")
     return Path(env) if env else core_project_root().parent / "exported_plots"

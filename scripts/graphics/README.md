@@ -40,6 +40,7 @@ Or import a plot function and tweak it:
 
 ```python
 from scripts.graphics.physics.drag_aircraft import plot_aircraft_drag
+
 fig = plot_aircraft_drag()
 ```
 

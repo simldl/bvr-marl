@@ -37,7 +37,8 @@ def analyze_profile_stats(stats_file="profiling_results/simulation_profile.stats
     stats.sort_stats("cumulative")
 
     top_funcs = []
-    for func, (cc, nc, tt, ct, callers) in list(stats.stats.items())[:20]:
+    for func in stats.fcn_list[:20]:
+        cc, nc, tt, ct, callers = stats.stats[func]
         filename, line, func_name = func
         pct = (ct / total_time * 100) if total_time > 0 else 0
         top_funcs.append((func_name, filename, ct, tt, pct, nc))
@@ -58,7 +59,8 @@ def analyze_profile_stats(stats_file="profiling_results/simulation_profile.stats
     stats.sort_stats("tottime")
 
     top_self_funcs = []
-    for func, (cc, nc, tt, ct, callers) in list(stats.stats.items())[:20]:
+    for func in stats.fcn_list[:20]:
+        cc, nc, tt, ct, callers = stats.stats[func]
         filename, line, func_name = func
         pct = (tt / total_time * 100) if total_time > 0 else 0
         top_self_funcs.append((func_name, filename, tt, pct, nc))

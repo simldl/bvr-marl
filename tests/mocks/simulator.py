@@ -357,8 +357,8 @@ class MockBenchmark:
 # Convenience functions for creating common test scenarios
 def create_basic_engagement_scenario():
     """Create a basic air-to-air engagement scenario."""
-    from .aircraft import MockAircraft, MockPosition
-    from .missiles import MockMissile
+    from tests.mocks.aircraft import MockAircraft, MockPosition
+    from tests.mocks.missiles import MockMissile
 
     scenario = MockScenario("Basic Engagement")
 
@@ -389,8 +389,8 @@ def create_basic_engagement_scenario():
 
 def create_bvr_scenario():
     """Create a Beyond Visual Range (BVR) scenario."""
-    from .aircraft import MockAircraft, MockPosition
-    from .missiles import MockAIM120
+    from tests.mocks.aircraft import MockAircraft, MockPosition
+    from tests.mocks.missiles import MockAIM120
 
     scenario = MockScenario("BVR Engagement")
 
@@ -422,8 +422,8 @@ def create_bvr_scenario():
 
 def create_multi_threat_scenario():
     """Create a multi-threat scenario."""
-    from .aircraft import MockAircraft, MockPosition
-    from .missiles import MockMissile
+    from tests.mocks.aircraft import MockAircraft, MockPosition
+    from tests.mocks.missiles import MockMissile
 
     scenario = MockScenario("Multi-Threat")
 

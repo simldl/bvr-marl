@@ -5,8 +5,7 @@ Episode reset and initialization logic.
 from __future__ import annotations
 
 import logging
-import random
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 from gymnasium import spaces
@@ -24,19 +23,37 @@ from bvr_marl_core.rl.environment.gym.env_helpers import (
     to_f32_obs,
 )
 from bvr_marl_core.rl.environment.gym.spawn_utils import (
-    compute_awacs_orbit_center,
     spawn_awacs,
     spawn_unit,
-    spawn_unit_with_geometry,
     spawn_with_geometry_config,
 )
-from bvr_marl_core.rl.environment.scenarios.geometry_sampler import GeometrySampler
+from bvr_marl_core.rl.environment.scenarios.geometry_sampler import (
+    RANDOM_MAP_REGIME,
+    GeometrySampler,
+)
 
 if TYPE_CHECKING:
-    from bvr_marl_core.rl.environment.spaces.obs_space_builder import ObservationBuilder
     from bvr_marl_core.simulator import Simulator
 
 logger = logging.getLogger(__name__)
+
+_KM_PER_DEG = 111.0
+
+
+def _awacs_placements(awacs_config) -> list[tuple[float, str]]:
+    """Return (lat_offset_deg, name_suffix) for each AWACS of a team.
+
+    A single AWACS sits on the EW axis. Multiple AWACS are spread symmetrically
+    north/south of the axis, spaced ``awacs_pair_spacing_km`` apart, so the flank
+    is watched from two aspects and one loss does not blind the team.
+    """
+    count = max(1, int(getattr(awacs_config, "count_per_team", 1)))
+    if count == 1:
+        return [(0.0, "")]
+    spacing_deg = float(getattr(awacs_config, "awacs_pair_spacing_km", 120.0)) / _KM_PER_DEG
+    # Symmetric offsets centred on 0, e.g. count=2 -> [-s/2, +s/2].
+    start = -spacing_deg * (count - 1) / 2.0
+    return [(start + i * spacing_deg, f"_{i + 1}") for i in range(count)]
 
 
 class EpisodeManager:
@@ -62,8 +79,10 @@ class EpisodeManager:
         self.agent_to_unit_id: dict[str, int] = {}
         self.agents: list[str] = []  # Currently alive agents
 
-        # AWACS unit IDs (not part of agent_to_unit_id since they're not RL agents)
-        self.awacs_unit_ids: dict[str, int] = {}  # "agent" -> uid, "opponent" -> uid
+        # AWACS unit IDs (not part of agent_to_unit_id since they're not RL agents).
+        # A team can field several AWACS (see AWACSConfigData.count_per_team), so
+        # each group maps to a list of unit-ids.
+        self.awacs_unit_ids: dict[str, list[int]] = {}  # "agent"/"opponent" -> [uid, ...]
 
         # Observation spaces — pre-populated from obs_space_mgr so RLlib env runners
         # can inspect observation_space before the first reset() call.
@@ -77,7 +96,7 @@ class EpisodeManager:
                 if mgr and all(isinstance(v, spaces.Space) for v in mgr.values()):
                     self.observation_space = dict(mgr)
                     self._need_space_update = False
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
 
         # Radar lock fix tracking
@@ -98,10 +117,6 @@ class EpisodeManager:
     def reset(self, seed: int | None = None) -> tuple[dict, dict]:
         """Reset the environment for a new episode."""
         if seed is not None:
-            # Seed all RNG sources for reproducibility
-            random.seed(seed)
-            np.random.seed(seed)
-
             # Seed PyTorch if available
             if HAS_TORCH:
                 torch.manual_seed(seed)
@@ -112,7 +127,14 @@ class EpisodeManager:
             if hasattr(self.simulator, "seed"):
                 try:
                     self.simulator.seed(seed)
-                except Exception:
+                except (
+                    AttributeError,
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                    IndexError,
+                    ZeroDivisionError,
+                ):
                     pass
 
         self.simulator.reset_sim(units={})
@@ -131,7 +153,7 @@ class EpisodeManager:
         # Update obs builder with unit IDs (fighters only, not AWACS)
         try:
             self.obs_builder.all_agent_ids = list(self.agent_to_unit_id.values())
-        except Exception:
+        except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
             pass
 
         # Build raw observations
@@ -201,8 +223,8 @@ class EpisodeManager:
 
         scenario_config = self.bvr_config.scenario_config
         if scenario_config.randomize_regime and len(allowed_regimes) > 1:
-            # Randomly select from allowed regimes
-            return random.choice(allowed_regimes)
+            rng = self.simulator.random_streams.generator("scenario_regime")
+            return allowed_regimes[int(rng.integers(0, len(allowed_regimes)))]
         else:
             # Use first/only regime
             return allowed_regimes[0]
@@ -227,6 +249,30 @@ class EpisodeManager:
             regime = self._select_regime()
             self.current_regime = regime
 
+            if regime == RANDOM_MAP_REGIME:
+                logger.debug("Using full-map random spawn regime")
+                random_map_cfg = getattr(scenario_config, "random_map_config", None)
+                kwargs: dict = {}
+                if random_map_cfg is not None:
+                    kwargs = {
+                        k: v
+                        for k, v in {
+                            "margin_frac": getattr(random_map_cfg, "margin_frac", None),
+                            "min_separation_m": getattr(random_map_cfg, "min_separation_m", None),
+                            "max_separation_m": getattr(random_map_cfg, "max_separation_m", None),
+                        }.items()
+                        if v is not None
+                    }
+                geometry_data = self.geometry_sampler.compute_random_map_positions(
+                    num_agents=len(self.bvr_config.agent_ids),
+                    num_opponents=len(self.bvr_config.opponent_ids),
+                    formation_spread_m=geometry_config.formation_spread_m,
+                    rng=self.simulator.random_streams.generator("geometry", "random_map"),
+                    **kwargs,
+                )
+                self.agent_to_unit_id.update(spawn_with_geometry_config(self, geometry_data))
+                return geometry_data
+
             if regime:
                 logger.debug(f"Using controlled geometry regime: {regime}")
 
@@ -241,11 +287,11 @@ class EpisodeManager:
                         position_noise_m=geometry_config.position_noise_m,
                         altitude_noise_m=geometry_config.altitude_noise_m,
                         heading_noise_deg=geometry_config.heading_noise_deg,
+                        rng=self.simulator.random_streams.generator("geometry", regime),
                     )
                 else:
                     geometry = self.geometry_sampler.sample(regime)
 
-                # Compute positions
                 geometry_data = self.geometry_sampler.compute_positions(
                     geometry,
                     num_agents=len(self.bvr_config.agent_ids),
@@ -254,7 +300,7 @@ class EpisodeManager:
                 )
 
                 # Spawn using geometry
-                self.agent_to_unit_id = spawn_with_geometry_config(self, geometry_data)
+                self.agent_to_unit_id.update(spawn_with_geometry_config(self, geometry_data))
                 return geometry_data
 
         # Fall back to random spawning
@@ -278,25 +324,34 @@ class EpisodeManager:
         scenario_config = self.bvr_config.scenario_config
         awacs_config = scenario_config.awacs_config
 
-        # Spawn agent team AWACS (blue / west side)
-        if awacs_config.agent_awacs:
-            try:
-                uid = spawn_awacs(self, "agent", awacs_config)
-                if uid is not None:
-                    self.awacs_unit_ids["agent"] = uid
-                    logger.debug(f"Spawned agent AWACS with unit ID {uid}")
-            except Exception as e:
-                logger.warning(f"Failed to spawn agent AWACS: {e}")
+        radar_overrides = {
+            "radar_max_range_m": awacs_config.radar_max_range_m,
+            "radar_tx_power_w": awacs_config.radar_tx_power_w,
+            "radar_antenna_gain_db": awacs_config.radar_antenna_gain_db,
+            "radar_snr_threshold_db": awacs_config.radar_snr_threshold_db,
+        }
 
-        # Spawn opponent team AWACS (red / east side)
-        if awacs_config.opponent_awacs:
-            try:
-                uid = spawn_awacs(self, "opponent", awacs_config)
-                if uid is not None:
-                    self.awacs_unit_ids["opponent"] = uid
-                    logger.debug(f"Spawned opponent AWACS with unit ID {uid}")
-            except Exception as e:
-                logger.warning(f"Failed to spawn opponent AWACS: {e}")
+        for group, enabled in (
+            ("agent", awacs_config.agent_awacs),
+            ("opponent", awacs_config.opponent_awacs),
+        ):
+            if not enabled:
+                continue
+            for lat_offset_deg, suffix in _awacs_placements(awacs_config):
+                try:
+                    uid = spawn_awacs(
+                        self,
+                        group,
+                        awacs_config,
+                        lat_offset_deg=lat_offset_deg,
+                        name_suffix=suffix,
+                        radar_overrides=radar_overrides,
+                    )
+                    if uid is not None:
+                        self.awacs_unit_ids.setdefault(group, []).append(uid)
+                        logger.debug(f"Spawned {group} AWACS{suffix} with unit ID {uid}")
+                except Exception as e:
+                    logger.warning(f"Failed to spawn {group} AWACS{suffix}: {e}")
 
     def get_agent_position(self, agent_id: str) -> tuple | None:
         """Get current position of an agent."""

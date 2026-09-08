@@ -1,16 +1,24 @@
 """Public simulator API for bvr_marl_core."""
 
-from .core.events import UnitDestroyedEvent, UnitRegisteredEvent, UnitRemovedEvent
-from .core.helpers import Position
-from .simulator import Simulator
-from .utils.angles import (
+from bvr_marl_core.simulator.core.events import (
+    UnitDestroyedEvent,
+    UnitRegisteredEvent,
+    UnitRemovedEvent,
+)
+from bvr_marl_core.simulator.core.helpers import Position
+from bvr_marl_core.simulator.simulator import Simulator
+from bvr_marl_core.simulator.utils.angles import (
     deg2rad,
     normalize_angle,
     rad2deg,
     signed_yaw_deg_diff,
 )
-from .utils.geodesics import geodetic_bearing_deg, geodetic_distance_km
-from .utils.map_limits import MapLimits
+from bvr_marl_core.simulator.utils.geodesics import (
+    geodetic_bearing_deg,
+    geodetic_distance_km,
+    geodetic_to_enu,
+)
+from bvr_marl_core.simulator.utils.map_limits import MapLimits
 
 __all__ = [
     "Simulator",
@@ -21,6 +29,7 @@ __all__ = [
     "rad2deg",
     "geodetic_bearing_deg",
     "geodetic_distance_km",
+    "geodetic_to_enu",
     "Position",
     "UnitDestroyedEvent",
     "UnitRegisteredEvent",

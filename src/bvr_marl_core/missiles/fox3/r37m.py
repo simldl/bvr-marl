@@ -19,13 +19,29 @@ class R37M(Missile):
             "n_max": 30.0,  # large missile; lower maneuver envelope
             "max_speed_mps": 2000.0,  # Mach ~6 class
             "min_range_m": 5000.0,
+            # Cited kinematic max range (RVV-BD, up to ~200 km).
+            "max_range_m": 200_000.0,
+            "drag_scale": 1.5,
             "seeker_sensitivity": 1.2,
             "life_time_s": 180.0,
             "hit_probability": 0.75,
+            "use_apn": True,
+            # Weapon-effectiveness submodels: very-long-range interceptor with a
+            # large warhead but a lower-reliability seeker/datalink at extreme range
+            # and reduced terminal maneuver. Lethal radius (warhead e-fold) uses the
+            # arsenal-wide 250 m; degradation comes from the seeker/track terms.
+            "lethal_radius_m": 250.0,
+            "warhead_effectiveness": 1.0,
+            # Preserve a lower terminal reliability than the smaller modern
+            # missiles without reducing a sub-metre intercept below ~0.75 Pk.
+            "fuze_reliability": 0.96,
+            "guidance_reliability": 0.94,
+            "seeker_reliability": 0.92,
+            "datalink_reliability": 0.90,
             "radar": {
                 "horizontal_fov_deg": 50.0,
                 "vertical_fov_deg": 25.0,
-                "max_range_m": 50_000.0,  # ARH activation distance
+                "max_range_m": 110_000.0,
                 "radar_frequency_hz": 10e9,
                 "tx_power_w": 10e3,
                 "antenna_gain_db": 35.0,

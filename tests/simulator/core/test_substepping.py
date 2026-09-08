@@ -13,7 +13,12 @@ from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
 
-from bvr_marl_core.simulator.core.substepping import SubstepConfig, Substepper
+from bvr_marl_core.simulator.core.substepping import (
+    SubstepConfig,
+)
+from bvr_marl_core.simulator.core.substepping import (
+    TerminalPathResolver as Substepper,
+)
 
 
 class TestSubstepConfig:
@@ -244,6 +249,21 @@ class TestSubstepperCollectCandidates:
         mock_distance.assert_called_once_with(missile, target)
 
     @patch("bvr_marl_core.simulator.core.substepping.units_distance_km")
+    def test_terminal_pair_remains_candidate_after_range_starts_opening(self, mock_distance):
+        """A missile that already entered terminal resolution must remain paired
+        after CPA, otherwise it survives the miss and turns back toward the target."""
+        mock_distance.return_value = 3.0
+        substepper = Substepper()
+        target = MockUnit(unit_id=2)
+        missile = MockUnit(unit_id=11, is_missile=True, target=target)
+        sim = SimpleNamespace(
+            ccd=SimpleNamespace(_engaged_once={missile.id}),
+            active_units={missile.id: missile, target.id: target},
+        )
+
+        assert substepper._collect_candidates([missile, target], sim) == [(missile, target)]
+
+    @patch("bvr_marl_core.simulator.core.substepping.units_distance_km")
     def test_locked_target_preferred_over_target(self, mock_distance):
         """Test that locked_target is preferred over target."""
         mock_distance.return_value = 1.0
@@ -351,6 +371,66 @@ class TestSubstepperCollectCandidates:
         sim = SimpleNamespace(active_units={2: launch_target})
         assert substepper._collect_candidates(units, sim) == [(missile, launch_target)]
 
+    @patch("bvr_marl_core.simulator.core.substepping.units_distance_km")
+    def test_operational_track_id_collision_never_resolves_through_active_units(
+        self, mock_distance
+    ):
+        substepper = Substepper()
+        friendly_collision = MockUnit(unit_id=1)
+        unrelated_hostile = MockUnit(unit_id=2)
+        missile = MockUnit(unit_id=10, is_missile=True, target=None, locked_target=None)
+        missile.weapon_track = object()
+        missile.radar = SimpleNamespace(get_locked_target=lambda: 1)
+        diagnostics = []
+        sim = SimpleNamespace(
+            active_units={1: friendly_collision, 2: unrelated_hostile},
+            _weapon_truth_associations={},
+            evaluator_target_for_weapon=lambda _missile: None,
+            record_diagnostic=diagnostics.append,
+        )
+
+        assert substepper._collect_candidates([missile, friendly_collision], sim) == []
+        assert diagnostics == ["missing_evaluator_target"]
+        mock_distance.assert_not_called()
+
+    @patch("bvr_marl_core.simulator.core.substepping.units_distance_km", return_value=1.0)
+    def test_operational_terminal_candidate_uses_only_evaluator_association(self, mock_distance):
+        substepper = Substepper()
+        friendly_collision = MockUnit(unit_id=1)
+        intended_target = MockUnit(unit_id=2)
+        missile = MockUnit(unit_id=10, is_missile=True, target=None, locked_target=None)
+        missile.weapon_track = object()
+        missile.radar = SimpleNamespace(get_locked_target=lambda: 1)
+        sim = SimpleNamespace(
+            active_units={1: friendly_collision, 2: intended_target},
+            _weapon_truth_associations={10: 2},
+            evaluator_target_for_weapon=lambda _missile: intended_target,
+        )
+
+        result = substepper._collect_candidates([missile, friendly_collision, intended_target], sim)
+
+        assert result == [(missile, intended_target)]
+        mock_distance.assert_called_once_with(missile, intended_target)
+
+    def test_operational_weapon_is_retired_when_latched_target_departed(self):
+        substepper = Substepper()
+        missile = MockUnit(unit_id=10, is_missile=True)
+        missile.weapon_track = object()
+        missile.should_be_removed = False
+        diagnostics = []
+        sim = SimpleNamespace(
+            active_units={10: missile},
+            _weapon_truth_associations={10: 2},
+            evaluator_target_for_weapon=lambda _missile: None,
+            evaluator_weapon_target_departed=lambda _missile: True,
+            record_diagnostic=diagnostics.append,
+        )
+
+        assert substepper._collect_candidates([missile], sim) == []
+        assert missile.should_be_removed
+        assert missile.removal_reason == "target_destroyed"
+        assert diagnostics == ["weapon_target_departed"]
+
 
 def _pos(lat=0.0, lon=0.0, alt=10000.0):
     """Build a minimal mutable geodetic position for substep tests."""
@@ -389,7 +469,7 @@ def _missile_with_path(path, unit_id=1):
 class TestSubstepperRunTickWithSubsteps:
     """Test run_tick_with_substeps + _substep_pair (authoritative-path CCD)."""
 
-    @patch("bvr_marl_core.simulator.core.substepping.Substepper._collect_candidates")
+    @patch("bvr_marl_core.simulator.core.substepping.TerminalPathResolver._collect_candidates")
     def test_no_candidates(self, mock_collect):
         """Test with no missile-target candidates."""
         mock_collect.return_value = []
@@ -402,7 +482,7 @@ class TestSubstepperRunTickWithSubsteps:
         assert result == []
         mock_collect.assert_called_once()
 
-    @patch("bvr_marl_core.simulator.core.substepping.Substepper._collect_candidates")
+    @patch("bvr_marl_core.simulator.core.substepping.TerminalPathResolver._collect_candidates")
     def test_no_hit_calc_available_returns_early(self, mock_collect):
         """With neither ccd.hit_calc nor sim.hit_calc, nothing is processed."""
         missile = MockUnit(is_missile=True)
@@ -416,7 +496,7 @@ class TestSubstepperRunTickWithSubsteps:
         substepper = Substepper()
         assert substepper.run_tick_with_substeps(sim, 1.0) == []
 
-    @patch("bvr_marl_core.simulator.core.substepping.Substepper._collect_candidates")
+    @patch("bvr_marl_core.simulator.core.substepping.TerminalPathResolver._collect_candidates")
     def test_cpa_hit_calls_on_hit_with_min_miss(self, mock_collect):
         """Detonation occurs at the closest point of approach (the minimum miss
         over the path), not at the first segment that enters the fuse radius."""
@@ -437,7 +517,7 @@ class TestSubstepperRunTickWithSubsteps:
         # tf = (best_i + best_ts) / n = (1 + 0.5) / 2 = 0.75; miss = CPA = 30 m.
         ccd.on_hit.assert_called_once_with(missile, target, 0.75, sim, miss_distance_m=30.0)
 
-    @patch("bvr_marl_core.simulator.core.substepping.Substepper._collect_candidates")
+    @patch("bvr_marl_core.simulator.core.substepping.TerminalPathResolver._collect_candidates")
     def test_still_closing_does_not_detonate(self, mock_collect):
         """If the minimum is at the final, still-closing waypoint, the missile is
         still approaching -> no detonation this tick (wait for CPA)."""
@@ -457,9 +537,9 @@ class TestSubstepperRunTickWithSubsteps:
 
         ccd.on_hit.assert_not_called()
 
-    @patch("bvr_marl_core.simulator.core.substepping.Substepper._collect_candidates")
-    def test_cpa_outside_fuse_does_not_detonate(self, mock_collect):
-        """A closest approach beyond the fuse radius is a clean miss."""
+    @patch("bvr_marl_core.simulator.core.substepping.TerminalPathResolver._collect_candidates")
+    def test_cpa_outside_fuse_is_retired_as_terminal_miss(self, mock_collect):
+        """An outside-fuze CPA is a clean miss and cannot circle for another pass."""
         missile = _missile_with_path([(0.0, 0.0, 1e4), (0.0, 0.005, 1e4), (0.0, 0.01, 1e4)])
         target = MockUnit(unit_id=2)
         target.position = _pos(lat=0.0, lon=0.05)
@@ -475,8 +555,11 @@ class TestSubstepperRunTickWithSubsteps:
         Substepper().run_tick_with_substeps(sim, 1.0)
 
         ccd.on_hit.assert_not_called()
+        assert missile.should_be_removed is True
+        assert missile.removal_reason == "terminal_miss"
+        assert missile._last_cpa_event["miss_m"] == 700.0
 
-    @patch("bvr_marl_core.simulator.core.substepping.Substepper._collect_candidates")
+    @patch("bvr_marl_core.simulator.core.substepping.TerminalPathResolver._collect_candidates")
     def test_empty_tick_path_falls_back_to_single_segment(self, mock_collect):
         """A missile with no recorded sub-path uses the single-segment CCD."""
         missile = MockUnit(unit_id=1, is_missile=True)
@@ -500,7 +583,7 @@ class TestSubstepperRunTickWithSubsteps:
         )
         ccd.on_hit.assert_called_once_with(missile, target, 0.5, sim)
 
-    @patch("bvr_marl_core.simulator.core.substepping.Substepper._collect_candidates")
+    @patch("bvr_marl_core.simulator.core.substepping.TerminalPathResolver._collect_candidates")
     def test_multiple_pairs_all_processed(self, mock_collect):
         """Test that multiple missile-target pairs are all processed."""
         missile1 = _missile_with_path([(0.0, 0.0, 1e4), (0.0, 0.01, 1e4)], unit_id=1)

@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from bvr_marl_core.rl.environment.gym.env_helpers import coerce_obs_to_space
+from bvr_marl_core.aircraft.systems.fire_veto import WASTED_VETO_CATEGORIES, wasted_signal_key
+from bvr_marl_core.domain.launch_geometry import sensor_snapshot
 
 if TYPE_CHECKING:
     pass
@@ -51,18 +52,47 @@ class ObservationInfoBuilder:
         envelope_scalars = self.action_processor.get_envelope_scalars(uid)
         action_state = self.action_processor.agent_states.get(uid, {})
 
-        # Update diagnostic metrics
         state_tracker.update_diagnostic_metrics(
             aid,
             training_signals.get("valid_missile_fires", 0),
             training_signals.get("vetoed_missile_attempts", 0),
             action_state.get("last_lock_ok", False),
             action_state.get("last_fov_ok", False),
+            in_envelope_shots=training_signals.get("in_envelope_missile_fires", 0),
+            out_of_envelope_shots=training_signals.get("out_of_envelope_missile_fires", 0),
+            suppressed_shots=training_signals.get("vetoed_missile_suppressed", 0),
+            wasted_shots=training_signals.get("vetoed_missile_wasted", 0),
+            no_target_shots=training_signals.get("vetoed_missile_no_target", 0),
+            wasted_shots_by_category={
+                category: training_signals.get(wasted_signal_key(category), 0)
+                for category in WASTED_VETO_CATEGORIES
+            },
+            shot_opportunity=training_signals.get("shot_opportunity", 0),
+            fire_attempt_on_opportunity=training_signals.get("fire_attempt_on_opportunity", 0),
+            launch_geometry=action_state.get("last_launch_geometry"),
+            # Per-step sensor-chain state, so a lock_rate collapse can be attributed to
+            # the link that broke rather than inferred from the endpoint.
+            # Did the policy designate a contact this step? lock_rate is measured
+            # against the DESIGNATED target, so this separates 'radar cannot see'
+            # from 'policy selected nothing to look at'.
+            target_designated=1.0 if action_state.get("selected_track_id") is not None else 0.0,
+            sensor_state=sensor_snapshot(
+                getattr(self.obs_builder, "simulator", None).active_units.get(uid)
+                if getattr(self.obs_builder, "simulator", None) is not None
+                else None
+            ),
         )
 
         return {
             "valid_missile_shots": training_signals.get("valid_missile_fires", 0),
             "vetoed_missile_shots": training_signals.get("vetoed_missile_attempts", 0),
+            "vetoed_missile_suppressed": training_signals.get("vetoed_missile_suppressed", 0),
+            "vetoed_missile_no_target": training_signals.get("vetoed_missile_no_target", 0),
+            "vetoed_missile_wasted": training_signals.get("vetoed_missile_wasted", 0),
+            "in_envelope_missile_shots": training_signals.get("in_envelope_missile_fires", 0),
+            "out_of_envelope_missile_shots": training_signals.get(
+                "out_of_envelope_missile_fires", 0
+            ),
             "valid_gun_shots": training_signals.get("valid_gun_fires", 0),
             "vetoed_gun_shots": training_signals.get("vetoed_gun_attempts", 0),
             "cooldown_left_missile_s": action_state.get("missile_cooldown_left_s", 0.0),

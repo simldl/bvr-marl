@@ -18,6 +18,7 @@ from bvr_marl_core.gui.extension_api import PageSpec
 from bvr_marl_core.gui.page_registry import load_extension_pages
 from bvr_marl_core.gui.theme import (
     apply_professional_theme,
+    normalize_theme_mode,
     render_sidebar_brand,
     render_workspace_banner,
 )
@@ -102,13 +103,6 @@ def _default_page_for_startup(startup_tab: str, pages: list[PageSpec]) -> PageSp
     return pages[0]
 
 
-def _normalize_theme_mode(theme_mode: str | None) -> str:
-    """Return a supported theme mode."""
-    if theme_mode == "dark":
-        return "dark"
-    return "light"
-
-
 def main() -> None:
     """Main GUI application."""
     gui_cfg = load_gui_config()
@@ -121,7 +115,7 @@ def main() -> None:
         initial_sidebar_state=sidebar_state,
     )
 
-    default_theme_mode = _normalize_theme_mode(display_cfg.get("theme", "light"))
+    default_theme_mode = normalize_theme_mode(display_cfg.get("theme", "light"))
     if "gui_theme_mode" not in st.session_state:
         st.session_state.gui_theme_mode = default_theme_mode
 

@@ -16,7 +16,6 @@ import argparse
 import os
 import warnings
 from datetime import datetime
-from pathlib import Path
 
 from bvr_marl_core.utils.config_loader import load_train_config, load_viz_config
 from bvr_marl_core.visualization.scenario_overlays import (
@@ -68,11 +67,11 @@ def run_live_view(
     # (b) imports only execute once the full runtime is ready, avoiding
     #     platform-specific initialization-order issues (e.g. Ray on Linux).
     import bvr_marl_core.visualization.reward_logging.reward_logger as _reward_logger_mod
-    import bvr_marl_core.visualization.scenplotter.video_generation as _video_gen_mod
     from bvr_marl_core.rl.environment.gym.bvr_multi_agent_env import BVRMultiAgentEnv
     from bvr_marl_core.rl.environment.gym.simplified_env import SimplifiedMultiAgentEnv
     from bvr_marl_core.simulator import Simulator
     from bvr_marl_core.utils.paths import core_project_root as project_root
+    from bvr_marl_core.visualization import ensure_interactive_matplotlib_backend
     from bvr_marl_core.visualization.model_wrapper.model_wrapper import (
         DefaultModel,
         TrainedModelWrapper,
@@ -80,7 +79,6 @@ def run_live_view(
     from bvr_marl_core.visualization.utils.path_utils import resolve_relative_path
     from bvr_marl_core.visualization.utils.reward_tracking_wrapper import RewardTrackingEnvWrapper
 
-    live_simulation = _video_gen_mod.live_simulation
     save_reward_logs = _reward_logger_mod.save_reward_logs
 
     # Load visualization config
@@ -110,7 +108,6 @@ def run_live_view(
     model_config_path = resolve_relative_path(model_config_path)
     train_config_path = resolve_relative_path(train_config_path)
 
-    # Get visualization settings
     viz_settings = viz_config.get("visualization", {})
     frames = frames_override if frames_override is not None else viz_settings.get("frames", 100)
     interval = (
@@ -124,10 +121,17 @@ def run_live_view(
     dpi = viz_settings.get("dpi", 200)  # render resolution; 200=default, 300=high, 400=ultra
     symbol_scale = viz_settings.get("symbol_scale", 2.0)  # sprite magnification; 2.0=default
     show_text = viz_settings.get("show_text", True) if show_text is None else bool(show_text)
+    label_settings = viz_settings.get("labeling", {})
+    focus_unit_id = label_settings.get("focus_unit_id")
+    video_focus_rule = str(label_settings.get("video_focus_rule", "none"))
     env_type = viz_config.get("env_type", "bvr")  # "bvr" or "simplified"
     real_time_speed = real_time or viz_settings.get("real_time_speed", False)
 
-    # Load train config
+    ensure_interactive_matplotlib_backend()
+    import bvr_marl_core.visualization.scenplotter.video_generation as _video_gen_mod
+
+    live_simulation = _video_gen_mod.live_simulation
+
     train_config = load_train_config(train_config_path)
     env_config = train_config.get("env", {})
 
@@ -213,6 +217,8 @@ def run_live_view(
         symbol_scale=symbol_scale,
         show_radar_cones=(env_type.lower() != "simplified"),
         show_text=show_text,
+        focus_unit_id=focus_unit_id,
+        video_focus_rule=video_focus_rule,
     )
 
     # Save reward logs after simulation completes

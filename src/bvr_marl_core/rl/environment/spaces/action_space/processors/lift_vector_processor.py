@@ -15,7 +15,7 @@ class LiftVectorProcessor:
         self,
         n_min: float = -2.0,
         phi_max_deg: float = 45.0,
-        tau_ang: float = 0.25,
+        tau_ang: float = 1.0,
         n_neutral: float = 1.0,
     ):
         """
@@ -24,7 +24,20 @@ class LiftVectorProcessor:
         Args:
             n_min: Minimum load factor
             phi_max_deg: Maximum bank angle (degrees)
-            tau_ang: Time constant for angular rate filtering (seconds)
+            tau_ang: Time constant for command smoothing (seconds). This must be
+                read against the CONTROL interval, not the integration step: at
+                the one-second tick every campaign config actually runs, the old
+                0.25 s gave alpha = 1 - exp(-1/0.25) = 0.982, so 98% of each raw
+                command landed on the airframe immediately and the filter was a
+                no-op dressed up as smoothing. Every bit of PPO's per-step
+                exploration noise went straight to the jet.
+
+                One control interval is the deliberate choice, not more. This
+                filter's only remaining job is to attenuate per-step policy
+                jitter; the physical smoothing now comes from the autopilot's
+                roll-rate and g-onset limits. Winding tau up further would make
+                the command filter, rather than the airframe, the binding
+                constraint on how fast the jet can manoeuvre.
             n_neutral: Load-factor command at action_n=0.5
         """
         self.n_min = n_min
@@ -79,13 +92,35 @@ class LiftVectorProcessor:
             "phi_cmd_filtered"
         ] + alpha_ang * phi_cmd
 
-        # Publish commanded n to physics for drag/Ps computation
+        # Hand the lift vector to the inner loop, which owns bank and load factor
+        # as rate-limited states and integrates them in sub-steps beneath this
+        # control tick. This processor no longer integrates attitude itself: doing
+        # so here meant a full tick's worth of heading change was applied as one
+        # jump, from a bank angle the aircraft was never required to reach.
+        self._dispatch_lift_vector(unit, state, dt, s_factor, c_factor)
+
+    def _dispatch_lift_vector(
+        self, unit, state: dict, dt: float, s_factor: float, c_factor: float
+    ) -> None:
+        """Publish the filtered lift vector to the airframe's inner loop."""
+        control = getattr(unit, "control", None)
+        setter = getattr(control, "set_lift_vector", None)
+        if callable(setter):
+            setter(
+                state["n_cmd_filtered"],
+                state["phi_cmd_filtered"],
+                s_factor,
+                c_factor,
+            )
+            return
+
+        # Fallback for control objects without an autopilot (test doubles, and
+        # any platform type that has not been migrated). Preserves the previous
+        # single-shot kinematic integration.
         try:
             unit.physics.n_external = abs(state["n_cmd_filtered"])
-        except Exception:
+        except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
             pass
-
-        # Convert to kinematic rates and apply
         self._apply_kinematic_rates(unit, state, dt, s_factor, c_factor)
 
     def map_action_to_load_factor(self, action_n: float, n_max: float) -> float:
@@ -170,9 +205,17 @@ class LiftVectorProcessor:
         n_filt = state["n_cmd_filtered"]
         phi_filt_rad = math.radians(state["phi_cmd_filtered"])
 
-        # Lift-vector components
-        chi_dot_cmd = (g / v) * n_filt * math.sin(phi_filt_rad)  # heading rate
-        gamma_dot_cmd = (g / v) * (n_filt * math.cos(phi_filt_rad) - 1.0)  # flight path angle rate
+        # Lift-vector components, standard 3-DOF point-mass form (Vinh 1993 ch. 2;
+        # Stevens & Lewis 2nd ed. sec. 2.5). The cos(gamma) terms were previously
+        # dropped, which is exact only in level flight: at the 60 deg flight-path
+        # limit cos(gamma) = 0.5, so gravity was over-subtracted by up to 0.5 g and
+        # turn rate under-predicted by a factor of two in a hard climb.
+        gamma_rad = math.radians(unit.pitch_deg)
+        cos_gamma = max(math.cos(gamma_rad), 0.1)
+        chi_dot_cmd = (g / v) * n_filt * math.sin(phi_filt_rad) / cos_gamma  # heading rate
+        gamma_dot_cmd = (g / v) * (
+            n_filt * math.cos(phi_filt_rad) - cos_gamma
+        )  # flight path angle rate
 
         # Apply rate limits
         omega_max_deg = self._get_max_turn_rate(unit, v, s_factor, c_factor)
@@ -207,7 +250,11 @@ class LiftVectorProcessor:
 
     def _get_max_pitch_rate(self, unit, s_factor: float, c_factor: float) -> float:
         """Get maximum pitch rate with envelope scaling."""
-        q_max_deg = getattr(unit.physics, "max_pitch_rate_deg_s", 25.0)
+        # Single source of truth: physics.max_pitch_rate_deg_s is now a real
+        # attribute. The 25.0 here used to disagree with the 20.0 fallback in
+        # FlyingPhysics.update_pitch_deg, so the two limiters bounded the same
+        # manoeuvre differently depending on which one you asked.
+        q_max_deg = getattr(unit.physics, "max_pitch_rate_deg_s", 20.0)
         return q_max_deg * s_factor * c_factor
 
     def _get_pitch_limit(self, unit) -> float:

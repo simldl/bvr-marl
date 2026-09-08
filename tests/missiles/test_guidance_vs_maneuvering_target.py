@@ -236,7 +236,9 @@ def run_engagement(
                 closest_m = d
 
         if not missile_alive:
-            hit = not target_alive
+            # Lethal hits enter a short death-spiral state before the aircraft is
+            # removed, so immediate roster membership alone undercounts kills.
+            hit = bool(getattr(target, "is_mortally_hit", False)) or not target_alive
             end_time_s = t
             break
 

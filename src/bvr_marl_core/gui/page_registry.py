@@ -14,7 +14,6 @@ Usage::
 
 from __future__ import annotations
 
-import importlib
 from importlib.metadata import entry_points
 
 from bvr_marl_core.gui.extension_api import PageSpec

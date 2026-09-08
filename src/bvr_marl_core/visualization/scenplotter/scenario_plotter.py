@@ -1,11 +1,9 @@
 import io
 import math
 from collections import namedtuple
-from typing import Optional
 
 import cairo
 import cartopy
-import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
@@ -18,6 +16,9 @@ def get_plotter_angle(yaw_deg: float) -> float:
 
 
 ColorRGBA = namedtuple("ColorRGBA", ["red", "green", "blue", "alpha"])
+_WHITE = ColorRGBA(1, 1, 1, 1)
+_TRANSPARENT_WHITE = ColorRGBA(1, 1, 1, 0)
+_GRAY = ColorRGBA(0.5, 0.5, 0.5, 1)
 
 
 def _affiliation_to_side(affiliation: str) -> str:
@@ -63,7 +64,7 @@ class Drawable:
 
 
 class StatusMessage(Drawable):
-    def __init__(self, text, text_color=ColorRGBA(1, 1, 1, 1), zorder: int = 0):
+    def __init__(self, text, text_color=_WHITE, zorder: int = 0):
         """Displays a message in the bottom left position."""
         super().__init__(zorder)
         self.text = text
@@ -71,7 +72,7 @@ class StatusMessage(Drawable):
 
 
 class TopLeftMessage(Drawable):
-    def __init__(self, text, text_color=ColorRGBA(1, 1, 1, 1), zorder: int = 0):
+    def __init__(self, text, text_color=_WHITE, zorder: int = 0):
         """Displays a message in the top left position."""
         super().__init__(zorder)
         self.text = text
@@ -84,7 +85,7 @@ class PolyLine(Drawable):
         points: list[tuple[float, float]],
         line_width: float = 1.0,
         dash: tuple[float, float] | None = None,
-        edge_color=ColorRGBA(1, 1, 1, 1),
+        edge_color=_WHITE,
         zorder: int = 0,
     ):
         """Draws a series of connected lines."""
@@ -103,8 +104,8 @@ class Rect(Drawable):
         right_lon: float,
         top_lat: float,
         line_width: float = 1.0,
-        edge_color=ColorRGBA(1, 1, 1, 1),
-        fill_color=ColorRGBA(1, 1, 1, 0),
+        edge_color=_WHITE,
+        fill_color=_TRANSPARENT_WHITE,
         zorder: int = 0,
     ):
         """Draws a rectangle."""
@@ -151,8 +152,8 @@ class Sprite(Drawable):
         lat: float,
         lon: float,
         yaw_deg: float,
-        edge_color=ColorRGBA(1, 1, 1, 1),
-        fill_color=ColorRGBA(0.5, 0.5, 0.5, 1),
+        edge_color=_WHITE,
+        fill_color=_GRAY,
         info_text: str | None = None,
         zorder: int = 0,
         affiliation: str = "unknown",
@@ -166,6 +167,36 @@ class Sprite(Drawable):
         self.fill_color = fill_color
         self.info_text = info_text
         self.affiliation = affiliation
+
+
+class MapLabel(Drawable):
+    """A map-anchored label whose pixel offset is assigned by the label manager."""
+
+    def __init__(
+        self,
+        lat: float,
+        lon: float,
+        text: str,
+        *,
+        unit_id: object = None,
+        priority: int = 0,
+        affiliation: str = "unknown",
+        cluster_name: str = "aircraft",
+        zorder: int = 20,
+    ):
+        super().__init__(zorder)
+        self.lat = lat
+        self.lon = lon
+        self.text = text
+        self.unit_id = unit_id
+        self.priority = priority
+        self.affiliation = affiliation
+        self.cluster_name = cluster_name
+        self.cluster_count = 1
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        self.draw_leader = False
+        self.visible = True
 
 
 class Airplane(Sprite):
@@ -334,13 +365,13 @@ class ScenarioPlotter:
         map_extents: MapLimits,
         dpi=200,
         background_mesh: BackgroundMesh | None = None,
-        config=PlotConfig(),
+        config: PlotConfig | None = None,
         symbol_registry=None,
     ):
         self.map_extents = map_extents
         self.dpi = dpi
         self.bg_mesh = background_mesh
-        self.cfg = config
+        self.cfg = config or PlotConfig()
         self.symbol_registry = symbol_registry
         self.projection = cartopy.crs.Mercator(
             central_longitude=(map_extents.left_lon + map_extents.right_lon) / 2
@@ -480,6 +511,8 @@ class ScenarioPlotter:
                 self._draw_status_message(ctx, o)
             elif isinstance(o, TopLeftMessage):
                 self._draw_top_left_message(ctx, o)
+            elif isinstance(o, MapLabel):
+                self._draw_map_label(ctx, o)
             elif isinstance(o, PolyLine):
                 self._draw_poly_line(ctx, o)
             elif isinstance(o, Arc):
@@ -660,6 +693,22 @@ class ScenarioPlotter:
         # White glyph fill
         ctx.set_source_rgba(1.0, 1.0, 1.0, 1.0)
         ctx.fill()
+
+    def _draw_map_label(self, ctx, o: MapLabel):
+        if not self.cfg.show_text or not o.visible or not o.text:
+            return
+        x, y, _ = self._get_image_xya(o.lat, o.lon, 0)
+        label_x = x + o.offset_x
+        label_y = y + o.offset_y
+        ctx.save()
+        if o.draw_leader:
+            ctx.set_source_rgba(0.8, 0.85, 0.9, 0.65)
+            ctx.set_line_width(1.0)
+            ctx.move_to(x, y)
+            ctx.line_to(label_x, label_y)
+            ctx.stroke()
+        self._draw_text(ctx, label_x, label_y, o.text)
+        ctx.restore()
 
     def _draw_airplane(self, ctx, o: Airplane):
         x, y, angle = self._get_image_xya(o.lat, o.lon, o.yaw_deg)
@@ -997,12 +1046,18 @@ class ScenarioPlotter:
         yaw_deg_offset = 90
         a1 = math.radians(-o.angle1 + yaw_deg_offset)
         a2 = math.radians(-o.angle2 + yaw_deg_offset)
+        full_circle = abs(float(o.angle2) - float(o.angle1)) >= 360.0 - 1e-6
 
         ctx.save()
         ctx.new_path()
-        ctx.move_to(x, y)
-        ctx.arc_negative(x, y, radius_px, a1, a2)
-        ctx.line_to(x, y)
+        if full_circle:
+            # Drawing a sector for 360 degrees adds a center-to-edge radial line
+            # at 0/360. A circle has the same filled area without that seam.
+            ctx.arc(x, y, radius_px, 0.0, 2.0 * math.pi)
+        else:
+            ctx.move_to(x, y)
+            ctx.arc_negative(x, y, radius_px, a1, a2)
+            ctx.line_to(x, y)
         ctx.close_path()
         if o.fill_color:
             ctx.set_source_rgba(*o.fill_color)

@@ -94,7 +94,7 @@ def run_scenario(scenario_name, agent_config, enemy_config, threshold=0.3, max_s
     # Configure auto-fire
     from bvr_marl_core.rl.environment.spaces.action_space import ActionProcessor
 
-    action_processor = ActionProcessor(simulator)
+    action_processor = ActionProcessor(simulator, information_mode="oracle")
     action_processor.configure_automation(
         enable_missile_automation=True,
         missile_auto_sqi_threshold=threshold,

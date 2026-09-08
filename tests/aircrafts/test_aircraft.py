@@ -268,8 +268,9 @@ def test_aircraft_substep_update(aircraft_instance):
 
 def test_apply_rl_action_basic(aircraft_instance, mock_simulator):
     """Test basic RL action application."""
-    # 9-element action vector: [throttle, yaw, pitch, target_select, fire, flares, chaff, ecm, decoys]
-    action = np.array([0.8, 0.6, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    # 10-element action vector:
+    # [throttle, yaw, pitch, missile_fire, target_select, gun, flares, chaff, ecm, decoys]
+    action = np.array([0.8, 0.6, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
     try:
         aircraft_instance.apply_rl_action(action, mock_simulator)
@@ -324,7 +325,7 @@ def test_apply_rl_action_weapon_engagement(aircraft_instance, mock_simulator):
 
     # First test: action with no firing (should work even without missiles)
     action_no_fire = np.array(
-        [0.5, 0.5, 0.5, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        [0.5, 0.5, 0.5, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0]
     )  # 10 elements, no fire
 
     # This should work - target selection without firing
@@ -337,7 +338,7 @@ def test_apply_rl_action_weapon_engagement(aircraft_instance, mock_simulator):
     aircraft_instance.weapons.missile_types = ["AIM120_AMRAAM"]  # Add a missile type
 
     # Action with target selection and firing
-    action_with_fire = np.array([0.5, 0.5, 0.5, 0.8, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # Fire enabled
+    action_with_fire = np.array([0.5, 0.5, 0.5, 1.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0])  # Fire enabled
 
     # This should now work with missile type available
     aircraft_instance.apply_rl_action(action_with_fire, mock_simulator)
@@ -348,7 +349,7 @@ def test_apply_rl_action_weapon_engagement(aircraft_instance, mock_simulator):
 def test_apply_rl_action_countermeasures(aircraft_instance, mock_simulator):
     """Test RL action countermeasure deployment."""
     # Action with countermeasures enabled
-    action = np.array([0.5, 0.5, 0.5, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0])  # All CMs enabled
+    action = np.array([0.5, 0.5, 0.5, 0.0, 0.5, 0.0, 1.0, 1.0, 1.0, 1.0])  # All CMs enabled
 
     try:
         aircraft_instance.apply_rl_action(action, mock_simulator)

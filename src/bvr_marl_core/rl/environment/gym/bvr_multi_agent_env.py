@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Optional
 
 import numpy as np
 from ray.rllib.policy import Policy
@@ -20,13 +19,20 @@ from bvr_marl_core.rl.environment.gym.gym_components.reward_config import (
     create_reward_calculator,
 )
 from bvr_marl_core.rl.environment.spaces.action_space import (
+    FULL_ACTION_DIM,
     ActionSpaceManager,
     EnergyLiftVectorActionProcessor,
+    emcon_action_dim,
 )
 from bvr_marl_core.rl.environment.spaces.obs_space_builder import ObservationBuilder
 from bvr_marl_core.rl.environment.spaces.obs_space_manager import (
     EnvConfig,
     ObservationSpaceManager,
+)
+from bvr_marl_core.rl.environment.spaces.observation.layout import observation_layout
+from bvr_marl_core.simulator.core.experiment_metadata import (
+    build_experiment_metadata,
+    prototype_warnings,
 )
 from bvr_marl_core.tacview.logger import TacviewLogger
 
@@ -39,9 +45,16 @@ class BVRMultiAgentEnv(BaseMultiAgentEnv):
     - All spaces are gymnasium Spaces (float32).
     - Observations are strictly coerced to their subspaces.
     - Actions are normalized Box([0,1]^10) and applied to numeric unit-ids.
-    - 10-dim action space: [Ps, n, φ, target, missile_fire, gun_fire, 4×CM]
+    - 10-dim action space: [Ps, n, φ, missile_fire, target, gun_fire, 4×CM]
       where Ps = specific energy rate, n = load factor, φ = bank angle
+
+    ``observation_builder_class`` is the extension point for a widened observation:
+    a subclass may point it at an ``ObservationBuilder`` subclass. The extra
+    enemy-fighter width must also be declared as ``ef_extra_dim`` on the env config
+    so the observation space matches what the builder emits.
     """
+
+    observation_builder_class = ObservationBuilder
 
     def __init__(self, config: dict, model: Policy | None = None):
         super().__init__(config)
@@ -50,6 +63,23 @@ class BVRMultiAgentEnv(BaseMultiAgentEnv):
 
         # Parse configuration
         self.config = BVREnvConfig.from_dict(config)
+        self.simulator.information_mode = self.config.information_mode
+        self.simulator.replay_metadata.update(build_experiment_metadata(config))
+        self.simulator.replay_metadata.update(
+            {
+                "information_mode": self.config.information_mode,
+                "oracle_use_reason": self.config.oracle_use_reason,
+            }
+        )
+
+        # Datalink 0/1 dropout rate (0.0 = always up) — read by DataLink each tick.
+        self.simulator.datalink_drop_prob = self.config.datalink_drop_prob
+
+        # Trace recording is only needed for visualization/tacview. Keep it on when
+        # a tacview log is requested; otherwise honor the config (default True).
+        self.simulator.record_traces = bool(
+            self.config.record_traces or self.config.tacview_logfile
+        )
 
         # Episode tracking
         self.current_step = 0
@@ -57,6 +87,9 @@ class BVRMultiAgentEnv(BaseMultiAgentEnv):
         # Expose config attributes for backward compatibility
         self.max_steps = self.config.max_steps
         self.tick_secs = self.config.tick_secs
+        # Episode duration in sim-seconds, read by the own-state builder for the
+        # time-remaining observation (the builder only sees the simulator).
+        self.simulator.episode_max_s = self.max_steps * self.tick_secs
         self.map_size_km = self.config.map_size_km
         self.map_width_km = self.config.map_width_km
         self.map_height_km = self.config.map_height_km
@@ -72,6 +105,17 @@ class BVRMultiAgentEnv(BaseMultiAgentEnv):
 
         # Initialize reward calculator
         self.reward_calculator = create_reward_calculator(config)
+        self.simulator.replay_metadata.update(self.reward_calculator.metadata())
+        governance_warnings = prototype_warnings(self.simulator.replay_metadata)
+        self.simulator.replay_metadata["governance_warnings"] = list(governance_warnings)
+        for warning in governance_warnings:
+            logger.warning("Experiment governance: %s", warning)
+
+        # Resolved observation layout, recorded so a checkpoint/config disagreement can
+        # be reported as "expected num_fm=6, got 4" instead of surfacing as a matrix
+        # shape error deep inside a forward pass. See observation/layout.py for the
+        # incident this exists to prevent.
+        self.observation_layout = observation_layout(config)
 
         # Builders/Managers
         env_conf = EnvConfig(
@@ -82,10 +126,37 @@ class BVRMultiAgentEnv(BaseMultiAgentEnv):
             ef_slots=self.config.num_ef,
             pr_slots=self.config.num_pr,
             warn_sectors=self.config.num_warn,
+            information_mode=self.config.information_mode,
+            oracle_use_reason=self.config.oracle_use_reason,
+            ef_extra_dim=self.config.ef_extra_dim,
+            extension_options=self.config.extension_options,
+            emcon_action_enabled=self.config.emcon_action_enabled,
         )
         self.obs_space_mgr = ObservationSpaceManager(self.config.all_agent_ids, env_conf)
-        self.obs_builder = ObservationBuilder(self.simulator, self.config.all_agent_ids, env_conf)
-        self.action_processor = EnergyLiftVectorActionProcessor(self.simulator)
+        self.obs_builder = self.observation_builder_class(
+            self.simulator, self.config.all_agent_ids, env_conf
+        )
+        self.action_processor = EnergyLiftVectorActionProcessor(
+            self.simulator, information_mode=self.config.information_mode
+        )
+        # Scripted active-sensing baseline (no-op for the default "learned" policy).
+        from bvr_marl_core.aircraft.systems.emcon_controller import EmconController
+
+        self.action_processor.emcon_controller = EmconController(
+            self.config.emcon_policy,
+            period_steps=self.config.emcon_period_steps,
+            duty=self.config.emcon_duty,
+        )
+
+        subsystem_modes = {
+            self.action_processor.information_mode.value,
+            self.obs_builder.own_state_builder.information_mode.value,
+            self.obs_builder.friendly_builder.information_mode.value,
+            self.obs_builder.enemy_builder.information_mode.value,
+            self.obs_builder.missile_warning_builder.information_mode.value,
+        }
+        if subsystem_modes != {self.config.information_mode}:
+            raise ValueError(f"Inconsistent subsystem information modes: {sorted(subsystem_modes)}")
 
         # Configure automated missile firing and weapon toggles
         self.action_processor.configure_automation(
@@ -100,8 +171,11 @@ class BVRMultiAgentEnv(BaseMultiAgentEnv):
         # Link action processor to simulator
         self.simulator.action_processor = self.action_processor
 
-        # Initialize action spaces
-        self.action_space_mgr = ActionSpaceManager(self.config.all_agent_ids, shape=10)
+        # Initialize action spaces. Base is 9 (flight + weapons + countermeasures);
+        # the EMCON radar toggle adds a 10th action when env.emcon_action_enabled is
+        # set (config-driven, falling back to the EMCON_ACTION_ENABLED default).
+        action_dim = emcon_action_dim(True) if self.config.emcon_action_enabled else FULL_ACTION_DIM
+        self.action_space_mgr = ActionSpaceManager(self.config.all_agent_ids, shape=action_dim)
         self.action_space = self.action_space_mgr.all()
 
         # Initialize modular components
@@ -145,6 +219,11 @@ class BVRMultiAgentEnv(BaseMultiAgentEnv):
         self.current_step = 0
         self.state_tracker.reset()
         self.termination_checker.reset_timing(self.config.tick_secs)
+        # Per-agent action state does not survive an episode: see
+        # ActionProcessorBase.reset. Omitting this let the contact-slot registry
+        # accumulate ghost contacts across episodes and silently corrupt target
+        # selection.
+        self.action_processor.reset()
 
         # Reset episode
         obs, infos = self.episode_manager.reset(seed=seed)
@@ -193,7 +272,6 @@ class BVRMultiAgentEnv(BaseMultiAgentEnv):
             sim_time_s=self.current_step * self.config.tick_secs,
         )
 
-        # Update simulation time
         self.termination_checker.update_simulation_time(self.config.tick_secs)
 
         # Check termination

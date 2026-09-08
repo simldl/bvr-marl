@@ -4,13 +4,14 @@ Step execution and reward computation logic.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 
+from bvr_marl_core.rl.environment.gym.gym_components.observation_builder import (
+    ObservationInfoBuilder,
+)
 from bvr_marl_core.simulator import UnitDestroyedEvent
-
-from .observation_builder import ObservationInfoBuilder
 
 if TYPE_CHECKING:
     from bvr_marl_core.simulator import Simulator
@@ -60,7 +61,6 @@ class StepProcessor:
         self.simulator.do_tick()
         kills_this_step = self._process_events(agent_to_unit_id, state_tracker, sim_time_s)
 
-        # Update missiles fired
         self._update_missiles_fired(
             current_agents, agent_to_unit_id, prev_missile_counts, state_tracker, sim_time_s
         )
@@ -92,12 +92,53 @@ class StepProcessor:
     def _apply_actions(self, actions: dict | None, current_agents: list, agent_to_unit_id: dict):
         """Apply actions to alive units."""
         actions = actions or {}
+        scenario = getattr(self.config, "scenario_config", None)
+        opponent_ids = set(getattr(self.config, "opponent_ids", []) or [])
+        hold_fire = bool(getattr(scenario, "opponent_hold_fire", False))
+        behavior = str(getattr(scenario, "opponent_behavior", "policy") or "policy")
+        scripted_flight = behavior in ("stationary_hold", "anchored_hold")
         for aid in current_agents:
             uid = agent_to_unit_id.get(aid)
             if uid is None or uid not in self.simulator.active_units:
                 continue
-            act = actions.get(aid, np.zeros(10, dtype=np.float32))
-            self.action_processor.apply(uid, np.clip(np.asarray(act, np.float32), 0.0, 1.0))
+            act = np.clip(
+                np.asarray(actions.get(aid, np.zeros(9, dtype=np.float32)), np.float32), 0.0, 1.0
+            )
+            if aid in opponent_ids and (hold_fire or scripted_flight):
+                act = self._scripted_opponent_action(act, behavior=behavior)
+            self.action_processor.apply(uid, act)
+
+    # Anchored-hold orbit commands. The spawn path marks scripted opponents with
+    # keep_inside_boundary, so targets remain inside the combat box while these
+    # simple flight patterns stay predictable for early curriculum stages.
+    _ANCHOR_BANK_ACTION = 0.85
+    _ANCHOR_LOAD_ACTION = 0.511
+
+    @staticmethod
+    def _scripted_opponent_action(act: np.ndarray, *, behavior: str) -> np.ndarray:
+        """Override a warmup opponent's action to a scripted, never-firing target.
+
+        Action layout (10-dim, normalized [0,1]): index 0 energy (0.5 = hold),
+        index 1 load factor (0.5 = 1g), index 2 bank (0.5 = wings level), index 3
+        missile fire, index 4 target select, 5 gun, 6-9 countermeasures.
+        ``stationary_hold`` flies straight-and-level, while ``anchored_hold``
+        flies a constant gentle level turn. Spawn-time boundary keeping prevents
+        either scripted target from turning a timeout into an opponent boundary
+        death. Hold-fire always zeros the weapon axes so the opponent never
+        shoots.
+        """
+        scripted = act.copy()
+        if behavior == "stationary_hold":
+            scripted[0:3] = 0.5  # neutral flight: 1g, wings level, maintain energy
+            scripted[4] = 0.5
+        elif behavior == "anchored_hold":
+            scripted[0] = 0.5  # hold energy
+            scripted[1] = StepProcessor._ANCHOR_LOAD_ACTION
+            scripted[2] = StepProcessor._ANCHOR_BANK_ACTION
+            scripted[4] = 0.5
+        scripted[3] = 0.0
+        scripted[5:10] = 0.0  # no gun / countermeasure employment
+        return scripted
 
     def _track_boundary_violations(
         self, current_agents: list, agent_to_unit_id: dict, state_tracker
@@ -197,6 +238,12 @@ class StepProcessor:
             else:
                 state_tracker.missiles_fired_last_step[aid] = 0
 
+        diagnostics = getattr(state_tracker, "missile_diagnostics", None)
+        if diagnostics is not None:
+            # Drained every step, not at episode end: the event list is cumulative
+            # and reading it once breaks on early termination.
+            diagnostics.collect_terminal_events(self.simulator)
+
     def _build_step_outputs(
         self,
         current_agents: list,
@@ -247,7 +294,6 @@ class StepProcessor:
                 )
                 rewards[aid] = reward_val
 
-                # Update tracking state
                 self.obs_info_builder.update_tracking_state(
                     aid,
                     uid,
@@ -277,9 +323,20 @@ class StepProcessor:
         current_step: int,
     ) -> tuple:
         """Compute reward for a single agent."""
-        enemies = helpers.get_enemies_for_agent(aid)
-        targets = helpers.get_targets_for_agent(aid)
-        incoming_missiles = helpers.get_incoming_missiles_for_agent(aid)
+        reward_mode = getattr(self.reward_calculator, "reward_information_mode", None)
+        reward_mode_value = getattr(reward_mode, "value", str(reward_mode or "observation_only"))
+        if reward_mode_value == "privileged_training":
+            enemies = helpers.get_enemies_for_agent(aid)
+            targets = helpers.get_targets_for_agent(aid)
+            incoming_missiles = helpers.get_incoming_missiles_for_agent(aid)
+        elif reward_mode_value == "evaluator_terminal_only":
+            enemies, targets, incoming_missiles = [], [], []
+        else:
+            enemies, targets, incoming_missiles = helpers.get_estimated_reward_context(
+                aid,
+                fighter_limit=int(getattr(self.config, "num_ef", 2)),
+                missile_limit=int(getattr(self.config, "num_em", 4)),
+            )
         previous_position = state_tracker.previous_positions.get(aid)
         missiles_fired = state_tracker.missiles_fired_last_step.get(aid, 0)
         previous_altitude = previous_position[2] if previous_position else None

@@ -127,6 +127,49 @@ class TestMissile:
             assert missile.speed == mock_source.speed
             assert missile.pitch_deg == mock_source.pitch_deg
 
+    def test_missile_inherits_shooter_velocity(
+        self, mock_source, mock_target, mock_map_limits, sample_config
+    ):
+        """The missile spawns with the shooter's speed and attitude, so its
+        velocity vector equals the shooter's kinematics at launch."""
+        import math
+
+        from bvr_marl_core.missiles.missile import Missile
+        from bvr_marl_core.simulator.utils.angles import yaw_geo_to_math
+
+        with (
+            patch("bvr_marl_core.missiles.missile.MissilePhaseManager"),
+            patch("bvr_marl_core.missiles.missile.MissileEngine"),
+            patch("bvr_marl_core.missiles.missile.MissilePhysics"),
+            patch("bvr_marl_core.missiles.missile.MissileMovement"),
+            patch("bvr_marl_core.missiles.missile.MissileRadar"),
+            patch("bvr_marl_core.missiles.missile.GuidanceTargetProvider"),
+            patch("bvr_marl_core.missiles.missile.MissileGuidance"),
+        ):
+            missile = Missile(
+                name="Test_Missile",
+                firing_time_s=0.0,
+                target=mock_target,
+                source=mock_source,
+                map_limits=mock_map_limits,
+                group="BLUE",
+                config=sample_config,
+            )
+
+            # Expected velocity from the shooter's (speed=300, yaw=45, pitch=5).
+            s = mock_source.speed
+            pitch_rad = math.radians(mock_source.pitch_deg)
+            yaw_math = math.radians(yaw_geo_to_math(mock_source.yaw_deg))
+            hor = s * math.cos(pitch_rad)
+            exp = (
+                hor * math.cos(yaw_math),
+                hor * math.sin(yaw_math),
+                s * math.sin(pitch_rad),
+            )
+
+            v = missile.velocity
+            assert (v.vx, v.vy, v.vz) == pytest.approx(exp)
+
     def test_missile_component_initialization(
         self, mock_source, mock_target, mock_map_limits, sample_config
     ):

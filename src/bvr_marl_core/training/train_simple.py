@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import os
 import platform
-import random
 import tempfile
 import warnings
 from pathlib import Path
@@ -34,7 +33,6 @@ if platform.system() == "Windows":
 os.environ["PYTHONWARNINGS"] = "ignore::DeprecationWarning"
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-import numpy as np  # noqa: E402
 import ray  # noqa: E402
 import torch  # noqa: E402
 import yaml as _yaml  # noqa: E402
@@ -51,6 +49,11 @@ from bvr_marl_core.rl.training.checkpoint_utils import (  # noqa: E402
     process_weight_loading,
 )
 from bvr_marl_core.rl.training.config_builder import build_ppo_config  # noqa: E402
+from bvr_marl_core.rl.training.runtime import (  # noqa: E402
+    create_tuner,
+    set_random_seeds,
+    shared_policy_mapping_fn,
+)
 from bvr_marl_core.rl.utils import create_simplified_env_creator  # noqa: E402
 from bvr_marl_core.utils import apply_overrides, load_config  # noqa: E402
 from bvr_marl_core.utils.paths import core_project_root as project_root  # noqa: E402
@@ -59,7 +62,7 @@ from bvr_marl_core.utils.paths import rl_configs_root  # noqa: E402
 
 def policy_mapping_fn(agent_id, *_args, **_kwargs):
     """All agents share a single policy (symmetric self-play)."""
-    return "shared_policy"
+    return shared_policy_mapping_fn(agent_id, *_args, **_kwargs)
 
 
 def setup_directories(cfg: dict) -> tuple[str, str]:
@@ -73,36 +76,10 @@ def setup_directories(cfg: dict) -> tuple[str, str]:
     return save_dir, log_dir
 
 
-def _set_random_seeds(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-
-def _create_tuner(cfg, ppo_config, run_config, experiment_dir):
-    if experiment_dir:
-        return tune.Tuner.restore(
-            path=experiment_dir,
-            trainable="PPO",
-            param_space=ppo_config.to_dict(),
-            resume_unfinished=True,
-            resume_errored=False,
-        )
-    return tune.Tuner(
-        trainable="PPO",
-        param_space=ppo_config.to_dict(),
-        run_config=run_config,
-    )
-
-
 def train_simple_main(cfg: dict) -> None:
     """Core simple training loop using SimplifiedMultiAgentEnv."""
     seed = cfg.get("seed", 42)
-    _set_random_seeds(seed)
+    set_random_seeds(seed)
 
     if torch.cuda.is_available() and cfg.get("num_gpus", 1) > 0:
         torch.cuda.set_device(0)
@@ -190,7 +167,7 @@ def train_simple_main(cfg: dict) -> None:
         stop={"training_iteration": total_iters},
     )
 
-    _create_tuner(cfg, ppo_config, run_config, experiment_dir).fit()
+    create_tuner(ppo_config, run_config, experiment_dir).fit()
     ray.shutdown()
 
 

@@ -5,13 +5,12 @@ Creates and configures environment instances with proper wrapping and setup.
 
 from collections.abc import Callable
 
+from bvr_marl_core.rl.utils.reward_wrapper import RewardNormalizationWrapper
+from bvr_marl_core.rl.utils.type_maps import resolve_aircraft_config
 from bvr_marl_core.simulator import Simulator
 
-from .reward_wrapper import RewardNormalizationWrapper
-from .type_maps import resolve_aircraft_config
 
-
-def _set_gymnasium_spec(env, env_id: str) -> None:
+def set_gymnasium_spec(env, env_id: str) -> None:
     """Set env.spec to a minimal EnvSpec so gymnasium.make()'s assertion passes.
 
     The new RLlib API stack wraps envs in SyncVectorMultiAgentEnv which calls
@@ -29,7 +28,7 @@ def _set_gymnasium_spec(env, env_id: str) -> None:
         env.spec = type("_EnvSpec", (), {"id": env_id, "max_episode_steps": None})()
 
 
-def _extract_env_cfg(cfg) -> dict:
+def extract_env_cfg(cfg) -> dict:
     """Extract env sub-config from either a plain dict or OmegaConf DictConfig."""
     if cfg is None:
         return {}
@@ -64,7 +63,7 @@ def create_simplified_env_creator(cfg) -> Callable[[dict], object]:
     from bvr_marl_core.rl.environment.gym.simplified_env import SimplifiedMultiAgentEnv
 
     def env_creator(env_config: dict):
-        merged = _extract_env_cfg(cfg)
+        merged = extract_env_cfg(cfg)
         merged.update(env_config or {})
 
         # Resolve aircraft type strings -> classes for the BVR spawning layer
@@ -79,7 +78,7 @@ def create_simplified_env_creator(cfg) -> Callable[[dict], object]:
 
         base_env = SimplifiedMultiAgentEnv(merged)
         env = _apply_reward_normalization(base_env, merged)
-        _set_gymnasium_spec(env, "SimplifiedMultiAgentEnv-v0")
+        set_gymnasium_spec(env, "SimplifiedMultiAgentEnv-v0")
         return env
 
     return env_creator
@@ -95,7 +94,7 @@ def create_env_creator(cfg) -> Callable[[dict], object]:
     from bvr_marl_core.rl.environment.gym.bvr_multi_agent_env import BVRMultiAgentEnv
 
     def env_creator(env_config: dict):
-        merged = _extract_env_cfg(cfg)
+        merged = extract_env_cfg(cfg)
         merged.update(env_config or {})
 
         # Resolve aircraft configuration from strings to classes
@@ -110,7 +109,7 @@ def create_env_creator(cfg) -> Callable[[dict], object]:
         base_env = BVRMultiAgentEnv(merged)
 
         env = _apply_reward_normalization(base_env, merged)
-        _set_gymnasium_spec(env, "BVRMultiAgentEnv-v0")
+        set_gymnasium_spec(env, "BVRMultiAgentEnv-v0")
         return env
 
     return env_creator

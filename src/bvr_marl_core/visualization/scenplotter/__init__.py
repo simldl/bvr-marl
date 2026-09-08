@@ -4,11 +4,12 @@ All visualization rendering types now live here (moved from bvr_marl_core.visual
 Import from this package rather than from bvr_marl_core.visualization.scenplotter.
 """
 
-from .scenario_plotter import (
+from bvr_marl_core.visualization.scenplotter.scenario_plotter import (
     AWACS,
     Airplane,
     Arc,
     Drawable,
+    MapLabel,
     Missile,
     PlotConfig,
     PolyLine,
@@ -18,7 +19,7 @@ from .scenario_plotter import (
     StatusMessage,
     TopLeftMessage,
 )
-from .symbol_registry import SymbolRegistry
+from bvr_marl_core.visualization.scenplotter.symbol_registry import SymbolRegistry
 
 __all__ = [
     "AWACS",
@@ -26,6 +27,7 @@ __all__ = [
     "Arc",
     "Drawable",
     "Missile",
+    "MapLabel",
     "PlotConfig",
     "PolyLine",
     "RadarCone",

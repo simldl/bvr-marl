@@ -20,13 +20,28 @@ class R77_1(Missile):
             "n_max": 40.0,
             "max_speed_mps": 1360.0,  # Mach ~4 class
             "min_range_m": 1500.0,
+            # Cited kinematic max range (RVV-SD, ~110 km). Short boost + long glide
+            # over-ranged in sim; a higher drag_scale bleeds the glide tail.
+            "max_range_m": 110_000.0,
+            "drag_scale": 2.5,
             "seeker_sensitivity": 1.2,
             "life_time_s": 120.0,
             "hit_probability": 0.82,
+            "use_apn": True,
+            # Weapon-effectiveness submodels: capable ARH, slightly lower
+            # seeker/datalink reliability than the Western/Meteor set.
+            "warhead_effectiveness": 1.0,
+            # A clean, non-maneuvering intercept should not lose nearly one shot
+            # in three to compounded reliability terms. Keep the R-77 below the
+            # newer Western weapons, but calibrate its zero-miss Pk to ~0.76.
+            "fuze_reliability": 0.96,
+            "guidance_reliability": 0.96,
+            "seeker_reliability": 0.94,
+            "datalink_reliability": 0.92,
             "radar": {
                 "horizontal_fov_deg": 60.0,
                 "vertical_fov_deg": 30.0,
-                "max_range_m": 40_000.0,  # ARH activation distance (nominal)
+                "max_range_m": 110_000.0,
                 "radar_frequency_hz": 10e9,
                 "tx_power_w": 8e3,
                 "antenna_gain_db": 32.0,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .controller import Controller
+from bvr_marl_core.interfaces.controller import Controller
 
 
 class ControllerFactory(Protocol):

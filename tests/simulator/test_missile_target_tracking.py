@@ -9,12 +9,9 @@ Covers:
 5. Non-missiles do not affect the registry
 6. Retarget registry sync in GuidanceTargetProvider
 
-Note: WeaponCooldowns.is_target_saturated tests have been moved to
-bvr-marl-behavior/tests/integration/test_weapon_cooldowns.py because
-WeaponCooldowns lives in bvr_marl_behavior and requires that package installed.
+Note: WeaponCooldowns.is_target_saturated tests live in the extension package,
+because WeaponCooldowns is defined there and requires that package installed.
 """
-
-from unittest.mock import Mock
 
 import pytest
 
@@ -23,30 +20,60 @@ from bvr_marl_core.simulator.simulator import Simulator
 
 # ---------------------------------------------------------------------------
 # Helpers
+#
+# These are explicit stubs rather than ``unittest.mock.Mock``. A bare Mock
+# fabricates every attribute it is asked for, so weapon-identity probes
+# (``weapon_track``, ``launch_contact_id``, ``missiles``) silently answer with a
+# truthy Mock and a legacy stub gets misread as an operational one. Declaring the
+# attributes keeps "this weapon has no weapon track" an assertable fact.
 # ---------------------------------------------------------------------------
 
 
+class _StubUnit:
+    """A minimal unit the simulator registry can account for."""
+
+    is_countermeasure = False
+    is_missile = False
+    # Legacy/oracle-path identity: no operational weapon track, no launch contact.
+    weapon_track = None
+    launch_contact_id = None
+    launch_sensor_id = None
+    launch_report_lineage = ()
+    designated_target_id = None
+
+    def __init__(self, group, target=None, unit_id=None):
+        self.group = group
+        self.target = target
+        self.position = Position(45.0, 10.0, 5000.0)
+        self.id = unit_id
+        self.missiles = []
+        # Kinematic surface the simulator reads when it records a unit trace.
+        self.yaw_deg = 0.0
+        self.pitch_deg = 0.0
+        self.roll_deg = 0.0
+        self.speed = 300.0
+
+    def update(self, tick_secs, sim):
+        return []
+
+    def substep_update(self, dt, sim):
+        return []
+
+
+class _StubMissile(_StubUnit):
+    is_missile = True
+
+
 def _make_target(target_id):
-    t = Mock()
-    t.id = target_id
-    return t
+    return _StubUnit("red", unit_id=target_id)
 
 
 def _make_aircraft(group):
-    """Create a minimal mock aircraft (not a missile)."""
-    a = Mock()
-    a.is_missile = False
-    a.is_countermeasure = False
-    a.group = group
-    a.target = None
-    a.position = Position(45.0, 10.0, 5000.0)
-    a.id = None
-    a.update = Mock(return_value=[])
-    a.substep_update = Mock(return_value=[])
-    return a
+    """Create a minimal stub aircraft (not a missile)."""
+    return _StubUnit(group)
 
 
-def _register_target(sim, target_id) -> Mock:
+def _register_target(sim, target_id) -> _StubUnit:
     """Register a dummy aircraft in sim with the given id, return it."""
     ac = _make_aircraft("red")
     ac.id = target_id  # pre-set so add_unit uses it
@@ -56,17 +83,8 @@ def _register_target(sim, target_id) -> Mock:
 
 
 def _make_missile(group, target, sim):
-    """Create a minimal mock missile whose target is pre-registered in sim."""
-    m = Mock()
-    m.is_missile = True
-    m.is_countermeasure = False
-    m.group = group
-    m.target = target
-    m.position = Position(45.0, 10.0, 5000.0)
-    m.id = None  # assigned by simulator
-    m.update = Mock(return_value=[])
-    m.substep_update = Mock(return_value=[])
-    return m
+    """Create a minimal stub missile whose target is pre-registered in sim."""
+    return _StubMissile(group, target=target)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +113,22 @@ class TestMissileTargetCountsRegistry:
         sim.add_unit(m1)
         sim.add_unit(m2)
         assert sim.count_missiles_at_target("blue", 42) == 2
+
+    def test_teammates_count_same_contact_by_shared_report_lineage(self, sim):
+        missile = _StubMissile("blue")
+        missile.id = 10
+        missile.launch_sensor_id = 1
+        missile.launch_contact_id = "local-a"
+        missile.launch_report_lineage = ((7, 101), (8, 202))
+        sim.active_units[missile.id] = missile
+
+        assert (
+            sim.count_missiles_at_contact("blue", 2, "local-b", report_lineage=((8, 202), (9, 303)))
+            == 1
+        )
+        assert (
+            sim.count_missiles_at_contact("blue", 2, "unrelated", report_lineage=((9, 303),)) == 0
+        )
 
     def test_add_missiles_different_targets(self, sim):
         tgt1 = _register_target(sim, 1)
@@ -217,17 +251,7 @@ class TestRetargetRegistrySync:
         new_target_id = target_b_id
 
         if old_target_id != new_target_id:
-            group = missile.group
-            missile_counts = sim._missile_target_counts
-            if old_target_id is not None:
-                grp_map = missile_counts.get(group, {})
-                if grp_map.get(old_target_id, 0) > 1:
-                    grp_map[old_target_id] -= 1
-                elif old_target_id in grp_map:
-                    del grp_map[old_target_id]
-            if new_target_id is not None:
-                grp_map = missile_counts.setdefault(group, {})
-                grp_map[new_target_id] = grp_map.get(new_target_id, 0) + 1
+            sim.resync_missile_target(missile.group, old_target_id, new_target_id)
 
         missile.target = target_b
 
@@ -251,10 +275,7 @@ class TestRetargetRegistrySync:
         assert sim.count_missiles_at_target("blue", target_a_id) == 2
 
         # Retarget m2 from A to B
-        grp_map = sim._missile_target_counts.setdefault("blue", {})
-        if grp_map.get(target_a_id, 0) > 1:
-            grp_map[target_a_id] -= 1
-        grp_map[target_b_id] = grp_map.get(target_b_id, 0) + 1
+        sim.resync_missile_target("blue", target_a_id, target_b_id)
         m2.target = target_b
 
         assert sim.count_missiles_at_target("blue", target_a_id) == 1

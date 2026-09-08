@@ -19,7 +19,7 @@ Example:
 
     # Multiple model tracking
     cv_filter = ConstantVelocityKFFilter(initial_pos, dt=0.1)
-    ct_filter = CoordinatedTurnKFFilter(initial_state_8d, cov_8x8, Q_8x8, R_3x3, dt=0.1)
+    ct_filter = CoordinatedTurnKFFilter(initial_state_7d, cov_7x7, Q_7x7, R_3x3, dt=0.1)
     imm = IMMFilter([cv_filter, ct_filter], transition_matrix, [0.8, 0.2], measurement_cov)
 """
 
@@ -35,6 +35,8 @@ __all__ = [
     "ConstantVelocityKFFilter",
     "CoordinatedTurnKFFilter",
     "IMMFilter",
+    "create_ct_filter",
+    "create_imm_cv_ct_filter",
 ]
 
 
@@ -59,7 +61,37 @@ def create_cv_filter(initial_position, dt=0.1, process_noise=20.0, measurement_n
     )
 
 
-def create_imm_cv_ct_filter(initial_position, dt=0.1, cv_weight=0.8):
+def create_ct_filter(initial_position, dt=0.1, measurement_covariance=None):
+    """Create a Cartesian CT filter with synthetic tracker-scale tuning."""
+    import numpy as np
+
+    measurement_covariance = (
+        np.eye(3)
+        if measurement_covariance is None
+        else np.asarray(measurement_covariance, dtype=float)
+    )
+    initial_state = np.concatenate(
+        [np.asarray(initial_position, dtype=float), np.zeros(4, dtype=float)]
+    )
+    initial_covariance = np.zeros((7, 7), dtype=float)
+    initial_covariance[:3, :3] = measurement_covariance
+    initial_covariance[3:6, 3:6] = np.eye(3) * 90_000.0
+    initial_covariance[6, 6] = np.radians(3.0) ** 2
+    return CoordinatedTurnKFFilter(
+        initial_state=initial_state,
+        initial_covariance=initial_covariance,
+        process_noise_cov=np.diag([0.0, 0.0, 0.0, 1.0, 1.0, 1.0, np.radians(0.05) ** 2]),
+        measurement_noise_cov=measurement_covariance,
+        dt=dt,
+    )
+
+
+def create_imm_cv_ct_filter(
+    initial_position,
+    dt=0.1,
+    cv_weight=0.8,
+    measurement_covariance=None,
+):
     """
     Convenience function to create a CV-CT IMM filter.
 
@@ -74,32 +106,21 @@ def create_imm_cv_ct_filter(initial_position, dt=0.1, cv_weight=0.8):
     import numpy as np
 
     # Create CV filter
-    cv_filter = create_cv_filter(initial_position, dt)
+    measurement_covariance = (
+        np.eye(3)
+        if measurement_covariance is None
+        else np.asarray(measurement_covariance, dtype=float)
+    )
+    cv_filter = ConstantVelocityKFFilter(
+        initial_position,
+        dt,
+        process_noise_std=8.0,
+        R_diag=tuple(np.diag(measurement_covariance)),
+    )
 
-    # Create CT filter (simplified initialization)
-    initial_state_8d = np.array(
-        [
-            initial_position[0],
-            initial_position[1],
-            initial_position[2],  # position
-            100.0,
-            0.0,
-            0.0,  # velocity magnitude, yaw, pitch
-            0.0,
-            0.0,  # turn rates
-        ]
-    )
-    ct_filter = CoordinatedTurnKFFilter(
-        initial_state=initial_state_8d,
-        initial_covariance=np.diag([100, 100, 40, 400, 180, 90, 30, 30]),
-        process_noise_cov=np.diag([1, 1, 1, 100, 10, 10, 5, 5]),
-        measurement_noise_cov=np.eye(3) * 1.0,
-        dt=dt,
-    )
+    ct_filter = create_ct_filter(initial_position, dt, measurement_covariance)
 
     # IMM configuration
-    transition_matrix = np.array([[0.95, 0.05], [0.05, 0.95]])
+    transition_matrix = np.array([[0.97, 0.03], [0.03, 0.97]])
     mode_probs = [cv_weight, 1.0 - cv_weight]
-    measurement_cov = np.eye(3) * 1.0
-
-    return IMMFilter([cv_filter, ct_filter], transition_matrix, mode_probs, measurement_cov)
+    return IMMFilter([cv_filter, ct_filter], transition_matrix, mode_probs, measurement_covariance)

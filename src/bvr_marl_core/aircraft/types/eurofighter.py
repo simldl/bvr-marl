@@ -15,6 +15,7 @@ class Eurofighter(Aircraft):
 
         # Physics (geometry corrected)
         mass_kg: float = 11000.0
+        fuel_capacity_kg: float = 3500.0  # internal fuel (empty = mass - fuel)
         reference_area_m2: float = 50.0
         aspect_ratio: float = 2.40
         oswald_e: float = 0.82
@@ -39,6 +40,7 @@ class Eurofighter(Aircraft):
         radar_beam_rate_hz: float = 12.0
         radar_beam_rate_p_hz: float = 10.0
         rcs: float = 3.0
+        irst_base_range_m: float = 45_000.0  # PIRATE IRST (passive, angle-only)
         # Passive Radar
         passive_radar_angular_error_deg: float = 5.0
         passive_radar_range_error_m: float = 2000.0

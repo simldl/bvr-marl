@@ -12,7 +12,6 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import matplotlib.style as mplstyle
-import numpy as np
 
 from bvr_marl_core.analysis.plotting import (
     TACTICAL_DASHBOARD_TAGS,

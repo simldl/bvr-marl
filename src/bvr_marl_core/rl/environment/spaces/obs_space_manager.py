@@ -1,8 +1,20 @@
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from gymnasium.spaces import Box
 from gymnasium.spaces import Dict as SpaceDict
+
+from bvr_marl_core.rl.environment.spaces.observation.constants import (
+    WARN_FEATURE_DIM,
+    d_EM,
+    d_FF,
+    d_FM,
+    d_MWS,
+    d_PR,
+    ef_token_dim,
+)
 
 
 def _fbox(shape, low=-np.inf, high=np.inf, dtype=np.float32):
@@ -26,20 +38,32 @@ class EnvConfig:
     pr_slots: int  # Number of passive radar detection slots
     warn_sectors: int  # Number of warning sectors
     all_agent_ids: tuple = ()  # All agent IDs (optional, set by ObservationBuilder)
+    information_mode: str = "sensor_limited"
+    oracle_use_reason: str | None = None
+    ef_extra_dim: int = 0  # extra enemy-fighter token columns supplied by an extension
+    emcon_action_enabled: bool = False  # widen ownship vector with own radar-emission state
+    # Opaque passthrough for an extension package's own builder options. Core never
+    # reads it; it exists so a subclass builder can be configured without core
+    # growing a field per extension.
+    extension_options: Mapping[str, Any] = field(default_factory=dict)
 
 
 class ObservationSpaceManager:
     """
     Creates fixed Gym observation spaces per agent based on EnvConfig.
 
-    Updated for new observation structure:
-      - own_state: 21 dims (SQI removed from policy observations)
-      - friendly_missiles: 8 dims per slot (added phase + seeker)
-      - friendly_fighters: 6 dims per slot (unchanged)
-      - enemy_missiles: 7 dims per slot (added TTI)
-      - enemy_fighters: 10 dims per slot (added per-fighter NEZ: active + passive, is_support_asset)
-      - passive_radar: unchanged
-      - missile_warning: unchanged
+    Observation structure (mask-driven tokens): every entity block is a flat
+    ``slots * token_dim`` vector where each token's last column is a validity
+    mask. Relations (missile/fighter -> enemy slot) and warnings are folded into
+    their tokens, so there are no separate mask/index keys. The key order here
+    matches the encoder's branch order.
+      - own_state:         (own_dim,)
+      - friendly_missiles: (fm_slots * d_FM)
+      - friendly_fighters: (ff_slots * d_FF)
+      - enemy_missiles:    (em_slots * d_EM)
+      - enemy_fighters:    (ef_slots * d_EF)
+      - missile_warnings:  (em_slots * d_MWS)
+      - passive_radar:     (pr_slots * d_PR)
     """
 
     def __init__(self, agent_ids: list[str], config: EnvConfig):
@@ -48,41 +72,15 @@ class ObservationSpaceManager:
         self.spaces = {aid: self._build_space(config) for aid in agent_ids}
 
     def _build_space(self, config: EnvConfig) -> SpaceDict:
-        # Entity dimensions (updated)
-        fm_ent_dim = 8  # [dx, dy, dz, dvx, dvy, dvz, phase, seeker_lock]
-        ff_ent_dim = 6  # [dx, dy, dz, dvx, dvy, dvz]
-        em_ent_dim = 7  # [dx, dy, dz, dvx, dvy, dvz, tti]
-        ef_ent_dim = (
-            10  # [dx, dy, dz, dvx, dvy, dvz, confidence, nez_active, nez_passive, is_support_asset]
-        )
-
-        warn_dim = 1 + config.warn_sectors
-
+        d_ef = ef_token_dim(config.ef_extra_dim)
         obs_space = {
-            # Own state (SQI removed; available only through metrics/evaluation)
             "own_state": _fbox((config.own_dim,)),
-            # Friendlies
-            "friendly_missiles": _fbox((config.fm_slots * fm_ent_dim,)),
-            "mask_friendly_missiles": _mbox((config.fm_slots,)),
-            "friendly_fighters": _fbox((config.ff_slots * ff_ent_dim,)),
-            "mask_friendly_fighters": _mbox((config.ff_slots,)),
-            # Targets/locks (builder provides these)
-            "fm_target_indices": _fbox((config.fm_slots * 1,), low=-1.0, high=float(np.inf)),
-            "mask_fm_targets": _mbox((config.fm_slots,)),
-            "ff_lock_indices": _fbox((config.ff_slots * 1,), low=-1.0, high=float(np.inf)),
-            "mask_ff_locks": _mbox((config.ff_slots,)),
-            # Enemies
-            "enemy_missiles": _fbox((config.em_slots * em_ent_dim,)),
-            "mask_enemy_missiles": _mbox((config.em_slots,)),
-            "enemy_fighters": _fbox((config.ef_slots * ef_ent_dim,)),
-            "mask_enemy_fighters": _mbox((config.ef_slots,)),
-            # Missile warning (builder provides these)
-            "missile_warning_flag": _mbox((1,)),
-            "missile_warning_dirs": _mbox((config.em_slots * warn_dim,)),
-            "mask_warning_dirs": _mbox((config.em_slots,)),
-            # Passive radar
-            "passive_radar": _fbox((config.pr_slots * 3,)),
-            "mask_passive_radar": _mbox((config.pr_slots,)),
+            "friendly_missiles": _fbox((config.fm_slots * d_FM,)),
+            "friendly_fighters": _fbox((config.ff_slots * d_FF,)),
+            "enemy_missiles": _fbox((config.em_slots * d_EM,)),
+            "enemy_fighters": _fbox((config.ef_slots * d_ef,)),
+            "missile_warnings": _fbox((config.em_slots * d_MWS,)),
+            "passive_radar": _fbox((config.pr_slots * d_PR,)),
         }
         return SpaceDict(obs_space)
 
@@ -129,7 +127,7 @@ class SimplifiedObservationSpaceManager:
         self.spaces = {aid: self._build_space(config) for aid in agent_ids}
 
     def _build_space(self, config: SimplifiedEnvConfig) -> SpaceDict:
-        warn_dim = 1 + config.warn_sectors
+        warn_dim = WARN_FEATURE_DIM
         obs_space = {
             "own_state": _fbox((self.OWN_DIM,)),
             "friendly_fighters": _fbox((config.ff_slots * self.ENTITY_DIM,)),

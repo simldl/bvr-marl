@@ -91,10 +91,10 @@ class DummyUnit:
             "CM",
             (),
             {
-                "launch_flares": lambda self: setattr(self, "flared", True),
-                "launch_chaff": lambda self: setattr(self, "chaffed", True),
-                "activate_ecm": lambda self: setattr(self, "ecm", True),
-                "deploy_decoys": lambda self: setattr(self, "decoys", True),
+                "launch_flares": lambda self, *a, **k: setattr(self, "flared", True),
+                "launch_chaff": lambda self, *a, **k: setattr(self, "chaffed", True),
+                "activate_ecm": lambda self, *a, **k: setattr(self, "ecm", True),
+                "deploy_decoys": lambda self, *a, **k: setattr(self, "decoys", True),
             },
         )()
 
@@ -120,8 +120,8 @@ def test_action_space_manager():
 def test_action_processor_apply():
     sim = DummySim()
     proc = ActionProcessor(sim)
-    # Provide 10 actions: throttle, yaw, pitch, target_select, missile_fire, gun_fire, flares, chaff, ecm, decoys
-    action = np.array([1.0, 0.5, 0.5, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+    # Provide 10 actions: energy, load, bank, missile_fire, target_select, gun_fire, flares, chaff, ecm, decoys
+    action = np.array([1.0, 0.5, 0.5, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
     proc.apply("A1", action)
     sim.active_units["A1"]
     # Test should pass if no exception is raised during action processing
@@ -219,8 +219,8 @@ def test_missile_fire_threshold_is_configurable_without_changing_other_triggers(
     proc = ActionProcessor(sim)
     proc.configure_automation(missile_fire_threshold=0.7)
 
-    assert proc.trigger_proc.apply_trigger(0.65, 4, {}) is False
-    assert proc.trigger_proc.apply_trigger(0.70, 4, {}) is True
+    assert proc.trigger_proc.apply_trigger(0.65, 3, {}) is False
+    assert proc.trigger_proc.apply_trigger(0.70, 3, {}) is True
     assert proc.trigger_proc.apply_trigger(0.65, 5, {}) is True
 
 
@@ -234,8 +234,12 @@ def test_simplified_action_order_maps_phi_before_load_factor():
     proc.apply("A1", action)
 
     state = proc.agent_states["A1"]
+    # Axis identity, not filter magnitude: a full-scale command on index 1 must
+    # move bank and leave load factor at its 1 g neutral. The previous ">10 deg"
+    # bound silently encoded the command filter's time constant, so re-tuning
+    # tau failed a test that is not about tau at all.
     assert state["n_cmd_filtered"] == pytest.approx(1.0)
-    assert state["phi_cmd_filtered"] > 10.0
+    assert state["phi_cmd_filtered"] > 0.0
 
 
 # =============================================================================

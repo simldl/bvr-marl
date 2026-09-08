@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -51,8 +51,19 @@ class AirLayer:
             return rho20 * math.exp(-(alt_m - 20_000.0) / 6000.0)
 
     def _compute_density_vec(self, altitudes: np.ndarray) -> np.ndarray:
-        vecf = np.vectorize(self._density_scalar)
-        return vecf(altitudes, self.rho0)
+        altitudes = np.asarray(altitudes, dtype=np.float32)
+        rho = np.empty_like(altitudes, dtype=np.float32)
+
+        low = altitudes < 11_000.0
+        mid = (altitudes >= 11_000.0) & (altitudes < 20_000.0)
+        high = ~low & ~mid
+
+        rho[low] = self.rho0 * np.exp(-altitudes[low] / 8500.0)
+        rho11 = self.rho0 * math.exp(-11_000.0 / 8500.0)
+        rho[mid] = rho11 * np.exp(-(altitudes[mid] - 11_000.0) / 6500.0)
+        rho20 = rho11 * math.exp(-(20_000.0 - 11_000.0) / 6500.0)
+        rho[high] = rho20 * np.exp(-(altitudes[high] - 20_000.0) / 6000.0)
+        return rho
 
     def get_density(self, alt_m: float) -> float:
         if 0.0 <= alt_m <= self._ALT_MAX:
@@ -130,7 +141,33 @@ class PhysicsParams:
     ground_clearance_taper_m: float = 500.0
     ground_min_climb_pitch_deg: float = 5.0
 
+    # --- Inner-loop attitude rate limits -------------------------------------
+    # These bound how fast the airframe can *reposition its lift vector*, which
+    # the kinematic (chi_dot / gamma_dot) form of the point-mass model does not
+    # constrain on its own. Without them a policy can invert the lift vector
+    # between two control ticks at zero cost, which is both unflyable and a free
+    # lunch the optimizer will happily exploit.
+    #: Maximum body roll rate. Fighter-class airframes sit around 150-270 deg/s;
+    #: the conservative end is used so the bank-reversal cost is never understated.
+    max_roll_rate_deg_s: float = 150.0
+    #: Maximum flight-path pitch rate (single source of truth: previously this
+    #: existed only as two disagreeing getattr() fallbacks, 20.0 and 25.0).
+    max_pitch_rate_deg_s: float = 20.0
+    #: Maximum g-onset rate, in g per second.
+    n_rate_max_g_per_s: float = 10.0
+    #: Absolute airframe bank limit. This is the structural/aerodynamic stop,
+    #: deliberately looser than the bank authority the action space hands the
+    #: policy, so the two limits stay separable.
+    phi_max_deg: float = 80.0
+
 
 class BasePhysics:
     def __init__(self, params: PhysicsParams):
         self.params = params
+        # Promote the inner-loop rate limits to instance attributes so that every
+        # consumer resolves the SAME number. They used to be read via getattr()
+        # fallbacks that disagreed with each other across modules.
+        self.max_roll_rate_deg_s = getattr(params, "max_roll_rate_deg_s", 150.0)
+        self.max_pitch_rate_deg_s = getattr(params, "max_pitch_rate_deg_s", 20.0)
+        self.n_rate_max_g_per_s = getattr(params, "n_rate_max_g_per_s", 10.0)
+        self.phi_max_deg = getattr(params, "phi_max_deg", 80.0)

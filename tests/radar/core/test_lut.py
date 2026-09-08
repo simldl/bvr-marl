@@ -22,9 +22,12 @@ def test_probability_inside_bounds(lut):
     assert 0.0 <= lut.get_probability(10000, 50.0) <= 1.0
 
 
-def test_probability_max_rcs_is_one(lut):
-    prob = lut.get_probability(500, 1e9)  # rcs >= max_rcs
-    assert prob == 1.0
+def test_probability_above_max_rcs_clamps_but_keeps_range_dependence(lut):
+    near = lut.get_probability(500, 1e9)
+    far = lut.get_probability(9000, 1e9)
+    assert near == pytest.approx(lut.get_probability(500, 50.0))
+    assert far == pytest.approx(lut.get_probability(9000, 50.0))
+    assert far < near
 
 
 def test_probability_decreases_with_distance(lut):

@@ -19,13 +19,21 @@ class K77M(Missile):
             "n_max": 40.0,
             "max_speed_mps": 1500.0,
             "min_range_m": 2000.0,
+            # Cited kinematic max range (R-77M / izdeliye 180, ~190 km, dual-pulse).
+            "max_range_m": 190_000.0,
+            "drag_scale": 1.5,
             "seeker_sensitivity": 1.3,  # AESA seeker (publicly claimed)
             "life_time_s": 150.0,
             "hit_probability": 0.85,
+            "use_apn": True,
             "radar": {
                 "horizontal_fov_deg": 60.0,
                 "vertical_fov_deg": 30.0,
-                "max_range_m": 45_000.0,  # ARH acquisition (nominal)
+                # A conventional fighter-sized target must be available to the
+                # active seeker at roughly 100 km. The previous 45 km hard gate
+                # made an otherwise well-supported 80 km shot coast for most of
+                # its flight and acquire only in the endgame.
+                "max_range_m": 110_000.0,
                 "radar_frequency_hz": 10e9,
                 "tx_power_w": 9e3,
                 "antenna_gain_db": 34.0,

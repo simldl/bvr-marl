@@ -7,14 +7,25 @@ from bvr_marl_core.simulator.core.units import Unit
 
 class PassiveRadar:
     def __init__(
-        self, angular_error_deg: float = 5.0, range_error_m: float = 2000.0, max_age_s: float = 3.0
+        self,
+        angular_error_deg: float = 5.0,
+        range_error_m: float = 2000.0,
+        max_age_s: float = 3.0,
+        rng: np.random.Generator | None = None,
     ):
         self.angular_error_deg = angular_error_deg
         self.range_error_m = range_error_m
         self.detections = []
         self.max_age_s = max_age_s
+        self.rng = rng if rng is not None else np.random.default_rng(0)
 
-    def receive_emission(self, emitter: Unit, receiver: Unit, timestamp: float):
+    def receive_emission(
+        self,
+        emitter: Unit,
+        receiver: Unit,
+        timestamp: float,
+        rng: np.random.Generator | None = None,
+    ):
         """
         Bearing & slant range from receiver to emitter using local ENU approximation.
         - Properly scales longitudinal difference by cos(latitude)
@@ -37,14 +48,15 @@ class PassiveRadar:
         azimuth_deg = (math.degrees(math.atan2(dE, dN)) + 360.0) % 360.0
 
         # Relative angle in receiver’s nose frame + noise, wrapped to [-180,180]
-        err = float(np.random.normal(0.0, self.angular_error_deg))
+        generator = rng if rng is not None else self.rng
+        err = float(generator.normal(0.0, self.angular_error_deg))
         rel_angle = (
             azimuth_deg - float(getattr(receiver, "yaw_deg", 0.0)) + err + 540.0
         ) % 360.0 - 180.0
 
         # Slant range with vertical component + range noise
         slant = math.sqrt(dE * dE + dN * dN + dz_m * dz_m)
-        dist_m = max(0.0, slant + float(np.random.normal(0.0, self.range_error_m)))
+        dist_m = max(0.0, slant + float(generator.normal(0.0, self.range_error_m)))
 
         detection = {
             "emitter_id": getattr(emitter, "id", None),

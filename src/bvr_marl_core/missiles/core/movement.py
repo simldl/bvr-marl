@@ -1,6 +1,3 @@
-import numpy as np
-
-
 class MissileMovement:
     def __init__(self, missile, physics):
         self.missile = missile
@@ -19,7 +16,7 @@ class MissileMovement:
             tick_secs,
         )
         m.position.lat, m.position.lon, m.position.alt = lat, lon, alt
-        m.speed = np.clip(spd, 0, m.max_speed_mps)
+        m.speed = min(max(spd, 0.0), m.max_speed_mps)
         m.yaw_deg = new_yaw
         m.pitch_deg = new_pitch
         m.roll_deg = new_roll
@@ -27,7 +24,8 @@ class MissileMovement:
 
     def _clamp_position(self, pos):
         m = self.missile
-        pos.lat = np.clip(pos.lat, m.map_limits.bottom_lat, m.map_limits.top_lat)
-        pos.lon = np.clip(pos.lon, m.map_limits.left_lon, m.map_limits.right_lon)
-        pos.alt = np.clip(pos.alt, m.map_limits.min_alt, m.map_limits.max_alt)
+        limits = m.map_limits
+        pos.lat = min(max(pos.lat, limits.bottom_lat), limits.top_lat)
+        pos.lon = min(max(pos.lon, limits.left_lon), limits.right_lon)
+        pos.alt = min(max(pos.alt, limits.min_alt), limits.max_alt)
         return pos

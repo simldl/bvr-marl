@@ -16,15 +16,34 @@ class AIM120_AMRAAM(Missile):
             "drag_coefficient": 0.08,
             "constant_engine_N": 9000.0,
             "motor_burn_s": 8.0,
+            # Slow the post-burnout energy bleed (the intended use of drag_scale) so
+            # the missile keeps enough terminal speed to run down an *extending*
+            # target: the no-escape zone vs a full-throttle extender reaches ~40-45 km
+            # instead of ~30 km, where the missile previously bled to ~590 m/s by 40 km
+            # and was out-run. A committed extender past ~55 km still escapes.
+            "drag_scale": 0.9,
             "n_max": 40.0,
             "max_speed_mps": 1370.0,  # ≈ Mach 4 sea-level
             "min_range_m": 1500.0,
+            # Cited kinematic max range (AIM-120D, head-on, high-altitude launch);
+            # anchors the DLZ. drag_scale (above) slows the post-burnout bleed so the
+            # no-escape zone vs an extender reaches ~45-50 km.
+            "max_range_m": 160_000.0,
             "seeker_sensitivity": 1.2,
             "life_time_s": 120.0,
             "hit_probability": 0.85,
-            # Warhead lethal-radius scale: Pk falls off with terminal miss
-            # distance, so a defender that opens ~150 m of miss largely survives.
-            "lethal_radius_m": 100.0,
+            # Warhead lethal-radius scale (see DEFAULT_LETHAL_RADIUS_M): the Gaussian
+            # e-fold of warhead lethality vs terminal miss. Decoupled from the wider
+            # proximity-fuze/CCD detonation radius (~500 m) so a fuze-triggering but
+            # off-boresight near-miss degrades Pk instead of counting as a clean kill.
+            "lethal_radius_m": 250.0,
+            # Weapon-effectiveness submodels (see KillProbabilityModel): a modern
+            # Western ARH missile with a reliable two-way datalink and seeker.
+            "warhead_effectiveness": 1.0,
+            "fuze_reliability": 0.95,
+            "guidance_reliability": 0.95,
+            "seeker_reliability": 0.95,
+            "datalink_reliability": 0.95,
             "radar": {
                 "horizontal_fov_deg": 60.0,
                 "vertical_fov_deg": 30.0,

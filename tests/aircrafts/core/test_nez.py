@@ -63,6 +63,27 @@ def test_nez_calculator_parent_reference(nez_calculator, mock_aircraft):
     assert nez_calculator.own.name == "test_nez_aircraft"
 
 
+def test_estimated_dlz_uses_track_state_and_covariance(nez_calculator):
+    state = np.array([0.0, 40_000.0, 0.0, 0.0, -250.0, 0.0])
+    covariance = np.diag([400.0, 900.0, 400.0, 25.0, 225.0, 25.0])
+
+    estimate = nez_calculator.compute_dlz_from_track(state, covariance)
+
+    assert estimate.range_sigma_m == pytest.approx(30.0)
+    assert estimate.conservative.r_aero_m < estimate.nominal.r_aero_m
+    assert estimate.nominal.r_aero_m < estimate.optimistic.r_aero_m
+    assert (
+        0.0
+        <= nez_calculator.sqi_from_estimate(40_000.0, estimate.closing_speed_mps, estimate.nominal)
+        <= 1.0
+    )
+
+
+def test_estimated_dlz_rejects_partial_covariance(nez_calculator):
+    with pytest.raises(ValueError, match="6x6 covariance"):
+        nez_calculator.compute_dlz_from_track(np.zeros(6), np.eye(3))
+
+
 # ============================================================================
 # MISSILE SELECTION TESTS
 # ============================================================================
@@ -587,3 +608,117 @@ def test_nez_calculator_complete_workflow(nez_calculator, mock_target):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_a_stationary_target_is_shootable_at_100km():
+    """A target that cannot run away must not be scored like one that is running.
+
+    R_aero used to scale with the TOTAL closing speed, so a stationary target with a
+    non-closing shooter (Vc ~ 0) scored f_aspect 0.45 -- essentially the same as a
+    target fleeing at 250 m/s (0.40). Measured on a stationary-target warmup stage, whose opponent is an
+    anchored hold, that put R_pi at 37-57 km against an engagement opening at
+    50-100 km: the shot was out of envelope for the whole episode and neither the BT
+    nor the RL policy could ever fire.
+
+    A non-stealth legacy fighter should be engageable at ~100 km with an AMRAAM, so
+    this is asserted on the real airframe and the real weapon rather than the 75 km
+    mock missile.
+    """
+    from bvr_marl_core.aircraft.types.eurofighter import Eurofighter
+    from bvr_marl_core.missiles.fox3.amraam import AIM120_AMRAAM
+    from bvr_marl_core.simulator.core.units import Position
+
+    class _MapLimits:
+        left_lon = -3.0
+        right_lon = 3.0
+        bottom_lat = -3.0
+        top_lat = 3.0
+        min_alt = 0.0
+        max_alt = 20_000.0
+
+    shooter = Eurofighter(
+        Position(lat=0.0, lon=0.0, alt=10_000.0), 0.0, 300.0, "BLUE", _MapLimits(), 0.0, 20_000.0
+    )
+    shooter.missile_types = [AIM120_AMRAAM]
+    calc = NoEscapeZoneCalculator(shooter)
+
+    state = np.array([0.0, 100_000.0, 0.0, 0.0, 0.0, 0.0])  # 100 km north, stationary
+    covariance = np.diag([400.0, 900.0, 400.0, 25.0, 225.0, 25.0])
+
+    dlz = calc.compute_dlz_from_track(state, covariance).nominal
+
+    assert dlz.r_pi_m > 100_000.0, f"R_pi only {dlz.r_pi_m / 1000:.1f} km"
+    assert calc.zone_for_range(100_000.0, dlz) in ("R2", "R3")
+
+
+def test_a_fleeing_target_still_shrinks_the_envelope(nez_calculator):
+    """The tail-chase penalty must survive the fix."""
+    covariance = np.diag([400.0, 900.0, 400.0, 25.0, 225.0, 25.0])
+    stationary = nez_calculator.compute_dlz_from_track(
+        np.array([0.0, 100_000.0, 0.0, 0.0, 0.0, 0.0]), covariance
+    ).nominal
+    fleeing = nez_calculator.compute_dlz_from_track(
+        np.array([0.0, 100_000.0, 0.0, 0.0, 300.0, 0.0]), covariance
+    ).nominal
+    closing = nez_calculator.compute_dlz_from_track(
+        np.array([0.0, 100_000.0, 0.0, 0.0, -300.0, 0.0]), covariance
+    ).nominal
+
+    assert fleeing.r_aero_m < stationary.r_aero_m < closing.r_aero_m
+
+
+def test_the_shooters_own_closure_does_not_change_the_envelope(nez_calculator):
+    """R_aero is a property of the TARGET's escape; the shooter's energy enters
+
+    separately through the launch-altitude/speed term. Counting its closure here
+    too was the double-count that penalised a shooter for stopping."""
+    covariance = np.diag([400.0, 900.0, 400.0, 25.0, 225.0, 25.0])
+    target_state = np.array([0.0, 100_000.0, 0.0, 0.0, 0.0, 0.0])
+
+    baseline = nez_calculator.compute_dlz_from_track(target_state, covariance).nominal
+    nez_calculator.own.speed = 0.0
+    stopped = nez_calculator.compute_dlz_from_track(target_state, covariance).nominal
+
+    assert stopped.r_aero_m == pytest.approx(baseline.r_aero_m, rel=0.25)
+
+
+def test_shooting_uphill_shrinks_the_envelope(nez_calculator):
+    """R_aero must know the altitude DIFFERENCE, not just the shooter's altitude.
+
+    `_achievable_max_range` scaled only with `own_alt`, so a shot taken from far
+    below its target was scored as if it were level. The legacy `_kinematic_range`
+    still carries this as `height_bonus`; the production path had lost it.
+
+    Measured on a BT rollout: mean launch 77.4 km at an altitude delta of -7120 m,
+    called in-envelope by the DLZ, with `missile_no_terminal_rate` 0.75 -- three
+    missiles in four never reached a terminal event because they spent their energy
+    climbing.
+    """
+    covariance = np.diag([400.0, 900.0, 400.0, 25.0, 225.0, 25.0])
+    level = nez_calculator.compute_dlz_from_track(
+        np.array([0.0, 80_000.0, 0.0, 0.0, 0.0, 0.0]), covariance
+    ).nominal
+    uphill = nez_calculator.compute_dlz_from_track(
+        np.array([0.0, 80_000.0, 7_000.0, 0.0, 0.0, 0.0]), covariance
+    ).nominal
+    downhill = nez_calculator.compute_dlz_from_track(
+        np.array([0.0, 80_000.0, -5_000.0, 0.0, 0.0, 0.0]), covariance
+    ).nominal
+
+    assert uphill.r_aero_m < level.r_aero_m < downhill.r_aero_m
+
+
+def test_climbing_costs_more_than_diving_gains(nez_calculator):
+    """Asymmetric on purpose: the missile cannot recover the energy on the way down."""
+    covariance = np.diag([400.0, 900.0, 400.0, 25.0, 225.0, 25.0])
+
+    def aero(up_m):
+        return nez_calculator.compute_dlz_from_track(
+            np.array([0.0, 80_000.0, float(up_m), 0.0, 0.0, 0.0]), covariance
+        ).nominal.r_aero_m
+
+    level = aero(0.0)
+    lost = level - aero(5_000.0)
+    gained = aero(-5_000.0) - level
+
+    assert lost > gained

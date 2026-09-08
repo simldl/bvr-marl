@@ -1,8 +1,6 @@
-"""
-Electronic Warfare (EW) module for radar jamming and countermeasures
-"""
+"""Electronic-warfare models: noise jamming as range denial."""
 
-from .ecm_emitter import ECMEmitter
-from .ew_world import EWWorld
+from bvr_marl_core.radar.ew.ew_world import EWWorld
+from bvr_marl_core.radar.ew.noise_jammer import burn_through_range_m
 
-__all__ = ["ECMEmitter", "EWWorld"]
+__all__ = ["EWWorld", "burn_through_range_m"]

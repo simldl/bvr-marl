@@ -1,7 +1,7 @@
 """
 Public baseline reward calculator for BVR air combat.
 
-This is the minimal reward baseline shipped with bvr-marl-core.
+This is the minimal reward baseline shipped with bvr-marl.
 It rewards kills, penalises destruction, and penalises boundary violations.
 
 For the full modular reward suite (tactical, energy, control, defensive shaping)
@@ -10,6 +10,12 @@ install an extension package that provides an extended
 """
 
 from __future__ import annotations
+
+from bvr_marl_core.rl.environment.rewards.information import (
+    RewardInformationClass,
+    ensure_reward_information_allowed,
+    resolve_reward_information_mode,
+)
 
 
 class RewardCalculator:
@@ -24,10 +30,33 @@ class RewardCalculator:
     """
 
     def __init__(self, **kwargs):
+        self.reward_information_mode = resolve_reward_information_mode(
+            kwargs.get("reward_information_mode")
+        )
         self.kill_reward = float(kwargs.get("kill_reward", 1.0))
         self.destruction_penalty = float(kwargs.get("destruction_penalty", -1.0))
         self.boundary_violation_penalty = float(kwargs.get("boundary_violation_penalty", -1.0))
         self.last_team_reward = float(kwargs.get("last_team_reward", 0.5))
+        self.component_information_classes = {
+            "kill": RewardInformationClass.EVALUATOR_TERMINAL_ONLY,
+            "destruction": RewardInformationClass.EVALUATOR_TERMINAL_ONLY,
+            "boundary_violation": RewardInformationClass.EVALUATOR_TERMINAL_ONLY,
+            "last_team": RewardInformationClass.EVALUATOR_TERMINAL_ONLY,
+        }
+        for component, information_class in self.component_information_classes.items():
+            ensure_reward_information_allowed(
+                self.reward_information_mode, component, information_class
+            )
+
+    def metadata(self) -> dict:
+        """Return the auditable reward contract for manifests and replays."""
+        return {
+            "reward_information_mode": self.reward_information_mode.value,
+            "reward_components": [
+                {"name": name, "information_class": information_class.value}
+                for name, information_class in self.component_information_classes.items()
+            ],
+        }
 
     # ------------------------------------------------------------------
     # Public interface — returns (total_reward, sqi, tactical_potential,

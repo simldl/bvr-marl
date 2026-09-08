@@ -1,6 +1,10 @@
 """Automation modules for weapon systems."""
 
-from .missile_automation import MissileAutomation
-from .weapon_cooldowns import WeaponCooldowns
+from bvr_marl_core.rl.environment.spaces.action_space.automation.missile_automation import (
+    MissileAutomation,
+)
+from bvr_marl_core.rl.environment.spaces.action_space.automation.weapon_cooldowns import (
+    WeaponCooldowns,
+)
 
 __all__ = ["MissileAutomation", "WeaponCooldowns"]

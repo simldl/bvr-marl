@@ -1,27 +1,26 @@
-import pytest
-
 from bvr_marl_core.missiles.core.phases import MissilePhaseManager
 
 
 def test_phase_manager_default_and_update():
-    # Default config with motor_burn_s=100
-    # Boost phase lasts 20s, then middle phase lasts until motor_burn_s (100s), then terminal
     manager = MissilePhaseManager(motor_burn_s=100)
-    # 0s: boost
     manager.update(0)
     assert manager.current_phase == "boost"
-    # 21s: middle (after boost ends at 20s)
     manager.update(21)
     assert manager.current_phase == "middle"
-    # 80s: still middle (motor burns until 100s)
     manager.update(80)
     assert manager.current_phase == "middle"
-    # 100s+: terminal (after motor burnout)
     manager.update(100)
     assert manager.current_phase == "terminal"
-    # Check thrust (should be 0 in terminal)
-    thrust = manager.get_thrust_kN()
-    assert thrust == 0.0  # No thrust in terminal phase
+    assert manager.get_thrust_kN() == 0.0
+
+
+def test_default_phase_durations_are_independent_between_instances():
+    short_burn = MissilePhaseManager(motor_burn_s=30)
+    long_burn = MissilePhaseManager(motor_burn_s=100)
+
+    assert short_burn.flight_phases["middle"]["duration_s"] == 10.0
+    assert long_burn.flight_phases["middle"]["duration_s"] == 80.0
+    assert MissilePhaseManager.DEFAULT_PHASES["middle"]["duration_s"] == 30.0
 
 
 def test_phase_manager_custom_config():

@@ -1,5 +1,5 @@
 """
-Smoke and functional tests for all bvr-marl-behavior entry-point executables.
+Smoke and functional tests for all entry-point executables.
 
 Covers:
   - bvr-train-simple  (training/train_simple.py:main)

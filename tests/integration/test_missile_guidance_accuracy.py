@@ -13,6 +13,7 @@ import pytest
 
 from bvr_marl_core.radar.core.utils import enu_to_geodetic, geodetic_to_enu
 from bvr_marl_core.simulator.core.helpers import Position
+from tests.helpers.track_snapshot import track_snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -200,17 +201,6 @@ class TestMissileGuidanceFiltering:
         )()
 
         # Create mock radar with tracks
-        mock_awacs = type(
-            "obj",
-            (),
-            {
-                "id": "awacs1",
-                "is_missile": False,
-                "is_countermeasure": False,
-                "is_non_engageable": True,  # AWACS
-            },
-        )()
-
         mock_fighter = type(
             "obj",
             (),
@@ -222,42 +212,16 @@ class TestMissileGuidanceFiltering:
             },
         )()
 
-        # Mock tracks: tid, state, cov, tgt, utype, ref, confidence, n_obs, lifetime, update_count,
-        #              is_deception, suspect_deception, engagement_id, jammer_id, engageable
         tracks = [
-            (
+            track_snapshot(
                 1,
-                np.array([1000, 0, 0, 100, 0, 0]),
-                None,
-                mock_awacs,
-                "air",
-                None,
-                0.9,
-                10,
-                5.0,
-                20,
-                False,
-                False,
-                None,
-                None,
-                False,
+                state=(1000, 0, 0, 100, 0, 0),
+                classification="support_aircraft",
+                engageable=False,
             ),
-            (
-                2,
-                np.array([2000, 0, 0, 100, 0, 0]),
-                None,
-                mock_fighter,
-                "air",
-                None,
-                0.9,
-                10,
-                5.0,
-                20,
-                False,
-                False,
-                None,
-                None,
-                True,
+            track_snapshot(
+                "target1",
+                state=(2000, 0, 0, 100, 0, 0),
             ),
         ]
 

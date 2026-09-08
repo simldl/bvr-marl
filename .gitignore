@@ -82,6 +82,7 @@ tacview/logs/
 *.acmi
 
 # ── Visualization generated outputs ──────────────────────────────────────────
+profiling_results/
 profiling_results/output/
 profiling_results/*.stats
 profiling_results/*.txt
@@ -111,7 +112,6 @@ ground_tracks.png
 # ── Data / generated outputs ─────────────────────────────────────────────────
 data/
 output/
-symbols/png/
 
 # ── Misc ─────────────────────────────────────────────────────────────────────
 *.sqlite3

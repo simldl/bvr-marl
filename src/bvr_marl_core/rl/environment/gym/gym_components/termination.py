@@ -7,8 +7,43 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
+from bvr_marl_core.aircraft.systems.fire_veto import (
+    WASTED_VETO_CATEGORIES,
+    team_wasted_info_key,
+)
+from bvr_marl_core.domain.launch_geometry import (
+    SENSOR_CONTACT_STEPS,
+    SENSOR_DIAGNOSTIC_KEYS,
+    SENSOR_NEAREST_CONTACT_KM,
+)
+
 if TYPE_CHECKING:
     from bvr_marl_core.simulator import Simulator
+
+
+def _sensor_means(sensor_sums: dict, agent_ids, step_count: int) -> dict:
+    """Per-step sensor means, with the right denominator for each key.
+
+    Most keys are counts that exist on every step, so they average over all steps.
+    `nearest_contact_km` is only DEFINED on steps where a track exists, so it averages
+    over those steps instead -- dividing it by all steps biases it toward zero exactly
+    in proportion to how often the agent holds nothing, which is the regime being
+    diagnosed and would make the metric lie hardest when it matters most.
+    """
+    totals = {
+        key: sum(sensor_sums.get(aid, {}).get(key, 0.0) for aid in agent_ids)
+        for key in SENSOR_DIAGNOSTIC_KEYS
+    }
+    contact_steps = totals.get(SENSOR_CONTACT_STEPS, 0.0)
+    out = {}
+    for key, total in totals.items():
+        if key == SENSOR_NEAREST_CONTACT_KM:
+            out[key] = total / contact_steps if contact_steps > 0 else float("nan")
+        elif key == SENSOR_CONTACT_STEPS:
+            out[key] = total / max(step_count, 1)
+        else:
+            out[key] = total / max(step_count, 1)
+    return out
 
 
 class TerminationChecker:
@@ -118,6 +153,12 @@ class TerminationChecker:
     ) -> dict:
         """Compute episode-end information for logging."""
         episode_missile_kills = getattr(state_tracker, "episode_missile_kills", {})
+        episode_in_envelope_missile_shots = getattr(
+            state_tracker, "episode_in_envelope_missile_shots", {}
+        )
+        episode_out_of_envelope_missile_shots = getattr(
+            state_tracker, "episode_out_of_envelope_missile_shots", {}
+        )
 
         # Compute team-level statistics
         total_missiles_fired_team_a = sum(
@@ -178,6 +219,51 @@ class TerminationChecker:
             state_tracker.episode_vetoed_missile_shots.get(aid, 0)
             for aid in self.config.opponent_ids
         )
+        episode_vetoed_suppressed = getattr(state_tracker, "episode_vetoed_missile_suppressed", {})
+        episode_vetoed_wasted = getattr(state_tracker, "episode_vetoed_missile_wasted", {})
+        episode_vetoed_no_target = getattr(state_tracker, "episode_vetoed_missile_no_target", {})
+        no_target_shots_team_a = sum(
+            episode_vetoed_no_target.get(aid, 0) for aid in self.config.agent_ids
+        )
+        no_target_shots_team_b = sum(
+            episode_vetoed_no_target.get(aid, 0) for aid in self.config.opponent_ids
+        )
+        suppressed_shots_team_a = sum(
+            episode_vetoed_suppressed.get(aid, 0) for aid in self.config.agent_ids
+        )
+        suppressed_shots_team_b = sum(
+            episode_vetoed_suppressed.get(aid, 0) for aid in self.config.opponent_ids
+        )
+        wasted_shots_team_a = sum(
+            episode_vetoed_wasted.get(aid, 0) for aid in self.config.agent_ids
+        )
+        wasted_shots_team_b = sum(
+            episode_vetoed_wasted.get(aid, 0) for aid in self.config.opponent_ids
+        )
+        # `wasted` split by the gate that rejected the launch. Emitted per team and
+        # per category so a run can be asked "which gate ate the shots?" without a
+        # replay -- the collapsed counter can only say "not target selection".
+        episode_vetoed_wasted_by_category = getattr(
+            state_tracker, "episode_vetoed_missile_wasted_by_category", {}
+        )
+        wasted_by_category_team = {}
+        for team, ids in (("a", self.config.agent_ids), ("b", self.config.opponent_ids)):
+            for category in WASTED_VETO_CATEGORIES:
+                wasted_by_category_team[team_wasted_info_key(team, category)] = sum(
+                    episode_vetoed_wasted_by_category.get(aid, {}).get(category, 0) for aid in ids
+                )
+        in_envelope_shots_team_a = sum(
+            episode_in_envelope_missile_shots.get(aid, 0) for aid in self.config.agent_ids
+        )
+        in_envelope_shots_team_b = sum(
+            episode_in_envelope_missile_shots.get(aid, 0) for aid in self.config.opponent_ids
+        )
+        out_of_envelope_shots_team_a = sum(
+            episode_out_of_envelope_missile_shots.get(aid, 0) for aid in self.config.agent_ids
+        )
+        out_of_envelope_shots_team_b = sum(
+            episode_out_of_envelope_missile_shots.get(aid, 0) for aid in self.config.opponent_ids
+        )
 
         # Count boundary deaths
         boundary_deaths_team_a = sum(
@@ -202,6 +288,31 @@ class TerminationChecker:
         team_b_lock_rate = (
             sum(state_tracker.episode_lock_ok_count.get(aid, 0) for aid in self.config.opponent_ids)
             / total_steps_b
+        )
+        # Steps on which a viable firing solution existed, counted independently of
+        # whether the trigger was pulled -- the opportunity denominator.
+        # getattr-guarded like the other episode counters above: minimal trackers and
+        # test doubles do not carry every field, and a missing counter must degrade to
+        # "no opportunities recorded", not raise.
+        episode_shot_opportunities = getattr(state_tracker, "episode_shot_opportunity_count", {})
+        steps_denominator = sum(
+            getattr(state_tracker, "episode_steps_count", {}).get(aid, 0)
+            for aid in self.config.agent_ids
+        )
+        shot_opportunities_team_a = sum(
+            episode_shot_opportunities.get(aid, 0) for aid in self.config.agent_ids
+        )
+        shot_opportunities_team_b = sum(
+            episode_shot_opportunities.get(aid, 0) for aid in self.config.opponent_ids
+        )
+        # P(fire | can_fire): did the policy pull the trigger on the steps where every
+        # launch gate had already passed? Same getattr-with-default treatment as the
+        # denominator above, for the same reason.
+        episode_fire_attempts_on_opportunity = getattr(
+            state_tracker, "episode_fire_attempt_on_opportunity_count", {}
+        )
+        fire_attempts_on_opportunity_team_a = sum(
+            episode_fire_attempts_on_opportunity.get(aid, 0) for aid in self.config.agent_ids
         )
         team_a_fov_rate = (
             sum(state_tracker.episode_fov_ok_count.get(aid, 0) for aid in self.config.agent_ids)
@@ -256,6 +367,21 @@ class TerminationChecker:
             "team_b_valid_missile_shots": valid_shots_team_b,
             "team_a_vetoed_missile_shots": vetoed_shots_team_a,
             "team_b_vetoed_missile_shots": vetoed_shots_team_b,
+            # Veto attribution: suppressed = doctrine/safety (no-target/cooldown/cap/
+            # winchester); wasted = trigger pulled on an invalid geometry (FOV/range/lock).
+            "team_a_vetoed_missile_suppressed": suppressed_shots_team_a,
+            "team_b_vetoed_missile_suppressed": suppressed_shots_team_b,
+            "team_a_vetoed_missile_wasted": wasted_shots_team_a,
+            "team_b_vetoed_missile_wasted": wasted_shots_team_b,
+            "team_a_vetoed_missile_no_target": no_target_shots_team_a,
+            "team_b_vetoed_missile_no_target": no_target_shots_team_b,
+            # ... and `wasted` itself split by gate: *_wasted_{fov,range,lock}.
+            # Overlapping conditions, so each is bounded by (not equal to) the sum.
+            **wasted_by_category_team,
+            "team_a_in_envelope_missile_shots": in_envelope_shots_team_a,
+            "team_b_in_envelope_missile_shots": in_envelope_shots_team_b,
+            "team_a_out_of_envelope_missile_shots": out_of_envelope_shots_team_a,
+            "team_b_out_of_envelope_missile_shots": out_of_envelope_shots_team_b,
             "team_a_never_fired": int(total_missiles_fired_team_a == 0),
             "team_a_ammo_remaining": team_a_ammo_remaining,
             # Kill/death tallies
@@ -278,6 +404,40 @@ class TerminationChecker:
             # Sensor discipline
             "team_a_lock_rate": team_a_lock_rate,
             "team_b_lock_rate": team_b_lock_rate,
+            # Sensor-chain means over the episode, team-A only. Emitted through the
+            # same path as shot_opportunities, which is the one proven to survive
+            # the runner boundary.
+            **_sensor_means(
+                getattr(state_tracker, "episode_sensor_sums", {}),
+                self.config.agent_ids,
+                steps_denominator,
+            ),
+            # Missile launch geometry + terminal outcome, aggregated per episode by
+            # the collector on state_tracker. Emitted here alongside the sensor means
+            # because this is the path proven to survive the runner boundary.
+            #
+            # This emit was written once, lost to a `git stash drop` before it was
+            # committed, and its absence then caused three campaigns (v19, v20, v21)
+            # to write NaN for every missile column while the agent was firing. The
+            # collector was working the whole time; nothing ever read it.
+            **(
+                state_tracker.missile_diagnostics.episode_metrics()
+                if getattr(state_tracker, "missile_diagnostics", None) is not None
+                else {}
+            ),
+            "team_a_shot_opportunities": shot_opportunities_team_a,
+            "team_b_shot_opportunities": shot_opportunities_team_b,
+            "team_a_fire_attempts_on_opportunity": fire_attempts_on_opportunity_team_a,
+            # The ratio itself, so a reader never has to reconstruct it from two counters
+            # that could be windowed differently. None (absent) when there were no
+            # opportunities at all -- that is "never had a shot", which is a different
+            # statement from "had shots and declined every one", and a 0.0 would erase
+            # the distinction this metric exists to make.
+            "team_a_fire_rate_when_feasible": (
+                fire_attempts_on_opportunity_team_a / shot_opportunities_team_a
+                if shot_opportunities_team_a > 0
+                else None
+            ),
             "team_a_fov_rate": team_a_fov_rate,
             "team_b_fov_rate": team_b_fov_rate,
             # Timing

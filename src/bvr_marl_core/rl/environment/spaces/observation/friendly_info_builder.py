@@ -10,8 +10,15 @@ Builds observations for:
 
 import numpy as np
 
-from .constants import d_FF, d_FM
-from .helpers import pad_generic, rel_state
+from bvr_marl_core.domain.information_mode import InformationMode, resolve_information_mode
+from bvr_marl_core.radar.core.friendly_picture import FriendlyPictureAdapter
+from bvr_marl_core.rl.environment.spaces.observation.constants import d_FF, d_FM
+from bvr_marl_core.rl.environment.spaces.observation.helpers import (
+    normalize_pos_vel,
+    pad_tokens,
+    rel_state,
+    to_body_frame,
+)
 
 
 class FriendlyInfoBuilder:
@@ -22,36 +29,31 @@ class FriendlyInfoBuilder:
         self.config = config
         self._ff_state_dim = d_FF
         self._fm_state_dim = d_FM
+        self.information_mode = resolve_information_mode(
+            getattr(config, "information_mode", None), default=InformationMode.SENSOR_LIMITED
+        )
         # Precomputed O(1) lookup: agent_id → float index in all_agent_ids
         all_ids = config.all_agent_ids if hasattr(config, "all_agent_ids") else []
         self._agent_id_to_idx: dict = {aid: float(i) for i, aid in enumerate(all_ids)}
 
-    def build(
-        self, agent_id: str
-    ) -> tuple[
-        np.ndarray,
-        np.ndarray,  # fm_states, fm_mask
-        np.ndarray,
-        np.ndarray,  # ff_states, ff_mask
-        np.ndarray,
-        np.ndarray,  # fm_target_indices, fm_t_mask
-        np.ndarray,
-        np.ndarray,  # ff_lock_indices, ff_l_mask
-    ]:
+    def build(self, agent_id: str) -> tuple[np.ndarray, np.ndarray]:
         """
-        Build friendly info observations.
+        Build friendly info observations as self-contained tokens.
+
+        The relation "which enemy-fighter slot is this missile/fighter guiding on"
+        is folded into the owning token as two compact scalars — a has-target/lock
+        flag and the normalized enemy slot index — replacing the old sparse
+        one-hot maps (which scaled with ef_slots and broke agent-count robustness).
 
         Returns:
-            tuple of 8 arrays:
-            - fm_states: Friendly missile relative states + phase + seeker [fm_slots, 8]
-            - fm_mask: Friendly missile mask [fm_slots]
-            - ff_states: Friendly fighter relative states [ff_slots, 6]
-            - ff_mask: Friendly fighter mask [ff_slots]
-            - fm_target_indices: Target indices for each missile [fm_slots]
-            - fm_t_mask: Missile target mask [fm_slots]
-            - ff_lock_indices: Lock indices for each fighter [ff_slots]
-            - ff_l_mask: Fighter lock mask [ff_slots]
+            tuple of 2 token arrays (validity mask folded into the last column):
+            - fm_tokens: Friendly missile tokens [fm_slots, d_FM]
+            - ff_tokens: Friendly fighter tokens [ff_slots, d_FF]
         """
+        if self.information_mode is InformationMode.SENSOR_LIMITED:
+            unit = self.simulator.active_units[agent_id]
+            return self._build_from_datalink_reports(unit)
+
         unit = self.simulator.active_units[agent_id]
 
         # Extract friendly missiles and fighters
@@ -76,50 +78,85 @@ class FriendlyInfoBuilder:
             key=lambda x: x.id,
         )
 
-        # Build relative states for fighters (keep simple)
-        ff_states = [rel_state(unit, f) for f in friend_fighters]
-
-        # Build enhanced states for missiles (state + phase + seeker)
-        fm_states = [self._build_missile_state(unit, m) for m in friend_missiles]
-
-        fm_arr, fm_mask = pad_generic(fm_states, self.config.fm_slots, self._fm_state_dim)
-        ff_arr, ff_mask = pad_generic(ff_states, self.config.ff_slots, self._ff_state_dim)
-
-        # Missile-Target-Indices — O(1) dict lookup instead of O(n) list.index()
+        # Enemy-fighter slot index each missile/fighter is guiding on, as
+        # (has_relation, slot_norm). slot_norm spreads slot i over [0,1].
+        ef_slots = self.config.ef_slots
         id2idx = self._enemy_target_id_to_obs_idx(unit)
-        fm_targets = []
-        for m in friend_missiles:
-            tgt_id = self._missile_target_id(m)
-            fm_targets.append([id2idx.get(tgt_id, -1.0)])
-        fm_t_arr, fm_t_mask = pad_generic(fm_targets, self.config.fm_slots, 1)
+        denom = max(ef_slots - 1, 1)
 
-        # Fighter-Lock-Indices
-        ff_locks = []
+        def _relation(target_id) -> list[float]:
+            idx = int(id2idx.get(target_id, -1))
+            if 0 <= idx < ef_slots:
+                return [1.0, idx / denom]
+            return [0.0, 0.0]
+
+        # Friendly fighters: body-frame normalized pos/vel + (has_lock, lock_slot).
+        ff_states = []
         for f in friend_fighters:
+            state = normalize_pos_vel(to_body_frame(rel_state(unit, f), unit.yaw_deg))
             locked = f.sensor.get_locked_targets()
             lock_id = next(iter(locked), None) if locked else None
-            ff_locks.append([id2idx.get(lock_id, -1.0)])
-        ff_l_arr, ff_l_mask = pad_generic(ff_locks, self.config.ff_slots, 1)
+            ff_states.append(state + _relation(lock_id))
 
+        # Friendly missiles: state + phase + seeker + (has_target, target_slot).
+        fm_states = []
+        for m in friend_missiles:
+            state = self._build_missile_state(unit, m)
+            fm_states.append(state + _relation(self._missile_target_id(m)))
+
+        fm_arr = pad_tokens(fm_states, self.config.fm_slots, self._fm_state_dim - 1)
+        ff_arr = pad_tokens(ff_states, self.config.ff_slots, self._ff_state_dim - 1)
+
+        return fm_arr, ff_arr
+
+    def _build_from_datalink_reports(self, unit) -> tuple[np.ndarray, np.ndarray]:
+        reports = FriendlyPictureAdapter(self.simulator).reports_for(unit)
+        track_slots = self._sensor_limited_track_slots(unit)
+        denominator = max(self.config.ef_slots - 1, 1)
+
+        def relation(track_id) -> list[float]:
+            slot = track_slots.get(track_id)
+            if slot is None:
+                return [0.0, 0.0]
+            return [1.0, float(slot) / denominator]
+
+        missile_states = []
+        fighter_states = []
+        for report in reports:
+            state = normalize_pos_vel(to_body_frame(report.relative_state_enu, unit.yaw_deg))
+            if report.is_missile:
+                missile_states.append(
+                    state
+                    + [report.phase, float(report.seeker_locked)]
+                    + relation(report.target_track_id)
+                )
+            else:
+                fighter_states.append(state + relation(report.lock_track_id))
         return (
-            fm_arr,
-            fm_mask,
-            ff_arr,
-            ff_mask,
-            fm_t_arr.ravel(),
-            fm_t_mask,
-            ff_l_arr.ravel(),
-            ff_l_mask,
+            pad_tokens(missile_states, self.config.fm_slots, self._fm_state_dim - 1),
+            pad_tokens(fighter_states, self.config.ff_slots, self._ff_state_dim - 1),
         )
+
+    def _sensor_limited_track_slots(self, unit) -> dict:
+        tracks = getattr(getattr(unit, "sensor", None), "sensor_tracks", ()) or ()
+        track_ids = []
+        for track in sorted(tracks, key=lambda item: str(item.track_id)):
+            if "missile" in track.classification or track.suspect_deception or not track.engageable:
+                continue
+            track_ids.append(track.track_id)
+        return {track_id: slot for slot, track_id in enumerate(track_ids[: self.config.ef_slots])}
 
     def _missile_target_id(self, missile):
         provider = getattr(missile, "target_provider", None)
-        provider_tid = getattr(provider, "current_target_id", None)
-        if provider_tid is not None:
-            return provider_tid
-        designated_tid = getattr(missile, "designated_target_id", None)
-        if designated_tid is not None:
-            return designated_tid
+        # What the weapon is prosecuting now, then what it was committed to at
+        # launch. These differ once the seeker re-issues its track.
+        for candidate in (
+            getattr(provider, "current_target_id", None),
+            getattr(missile, "launch_contact_id", None),
+            getattr(missile, "designated_target_id", None),
+        ):
+            if candidate is not None:
+                return candidate
         tgt = getattr(missile, "target", None)
         return getattr(tgt, "id", None) if tgt is not None else None
 
@@ -128,25 +165,12 @@ class FriendlyInfoBuilder:
         tracks = getattr(getattr(unit, "sensor", None), "sensor_tracks", []) or []
 
         def _track_sort_key(track):
-            tid = track[0] if len(track) > 0 and track[0] is not None else -1
-            tgt = track[3] if len(track) > 3 else None
-            is_support = 1 if (tgt is not None and getattr(tgt, "is_support_asset", False)) else 0
-            return (is_support, tid)
+            return (int("support" in track.classification), str(track.track_id))
 
         for track in sorted(tracks, key=_track_sort_key):
-            parsed = self._parse_track(track)
-            if parsed is None:
-                continue
-            tgt, suspect_deception = parsed
-            if tgt is None or suspect_deception:
-                continue
-            if getattr(tgt, "is_non_engageable", False):
-                continue
-            if getattr(tgt, "is_missile", False):
-                continue
-            tid = getattr(tgt, "id", None)
-            if tid is not None and tid not in target_ids:
-                target_ids.append(tid)
+            # Oracle observations enumerate evaluator units below. TrackSnapshot
+            # intentionally contains no evaluator identity to resolve here.
+            continue
 
         if not target_ids:
             target_ids = [
@@ -168,14 +192,6 @@ class FriendlyInfoBuilder:
             id2idx.setdefault(aid, idx)
         return id2idx
 
-    @staticmethod
-    def _parse_track(track):
-        if len(track) >= 15:
-            return track[3], bool(track[11])
-        if len(track) >= 11:
-            return track[3], bool(track[7])
-        return None
-
     def _build_missile_state(self, unit, missile) -> list[float]:
         """
         Build enhanced missile state with phase and seeker info.
@@ -185,20 +201,15 @@ class FriendlyInfoBuilder:
         [6]: Phase encoded [0-1] (boost=0.33, mid=0.67, terminal=1.0)
         [7]: Seeker lock state [0/1]
         """
-        # Get basic relative state (returns list)
-        state = rel_state(unit, missile)
+        # Get basic relative state (body-frame, normalized pos/vel)
+        state = normalize_pos_vel(to_body_frame(rel_state(unit, missile), unit.yaw_deg))
 
-        # Get missile phase
         phase_encoded = self._get_missile_phase(missile)
 
         # Get seeker lock state
         seeker_lock = self._get_seeker_lock(missile)
 
-        # Concatenate: convert to list if needed and append
-        if isinstance(state, np.ndarray):
-            return state.tolist() + [phase_encoded, seeker_lock]
-        else:
-            return state + [phase_encoded, seeker_lock]
+        return state + [phase_encoded, seeker_lock]
 
     def _get_missile_phase(self, missile) -> float:
         """

@@ -2,6 +2,8 @@ import math
 
 import numpy as np
 
+_IDENTITY3 = np.eye(3)
+
 
 def enu_basis(lat_deg: float, lon_deg: float) -> np.ndarray:
     """
@@ -16,19 +18,20 @@ def enu_basis(lat_deg: float, lon_deg: float) -> np.ndarray:
     """
     lat = math.radians(float(lat_deg))
     lon = math.radians(float(lon_deg))
+    sin_lat = math.sin(lat)
+    cos_lat = math.cos(lat)
+    sin_lon = math.sin(lon)
+    cos_lon = math.cos(lon)
 
-    # ENU basis vectors
-    e = np.array([-math.sin(lon), math.cos(lon), 0.0], dtype=float)
-    n = np.array(
-        [-math.sin(lat) * math.cos(lon), -math.sin(lat) * math.sin(lon), math.cos(lat)], dtype=float
+    # Columns are the ENU basis vectors [e, n, u]; orthonormal by construction,
+    # no QR needed. (QR would introduce inconsistent sign flips.)
+    return np.array(
+        [
+            [-sin_lon, -sin_lat * cos_lon, cos_lat * cos_lon],
+            [cos_lon, -sin_lat * sin_lon, cos_lat * sin_lon],
+            [0.0, cos_lat, sin_lat],
+        ]
     )
-    u = np.array(
-        [math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat)], dtype=float
-    )
-
-    # e, n, u are already orthonormal by construction; no QR needed.
-    # (QR would introduce inconsistent sign flips that corrupt rotation matrices.)
-    return np.column_stack([e, n, u])
 
 
 def enu_rotation(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> np.ndarray:
@@ -47,17 +50,12 @@ def enu_rotation(from_lat: float, from_lon: float, to_lat: float, to_lon: float)
     Returns:
         3x3 rotation matrix
     """
+    if from_lat == to_lat and from_lon == to_lon:
+        return _IDENTITY3.copy()
+
     B_from = enu_basis(from_lat, from_lon)
     B_to = enu_basis(to_lat, to_lon)
-    R = B_to.T @ B_from
-
-    # Project to nearest rotation matrix using SVD (numerical safety)
-    U, _, Vt = np.linalg.svd(R)
-    R = U @ Vt
-
-    # Ensure proper rotation (det = +1)
-    if np.linalg.det(R) < 0:
-        U[:, -1] *= -1
-        R = U @ Vt
-
-    return R
+    # Both bases are orthonormal by construction, so their product is already a
+    # proper rotation (det = +1) up to floating-point rounding; no SVD projection
+    # is needed.
+    return B_to.T @ B_from

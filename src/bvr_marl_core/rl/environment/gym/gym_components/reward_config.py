@@ -21,4 +21,5 @@ def create_reward_calculator(config: dict) -> RewardCalculator:
         destruction_penalty=magnitudes.get("destruction_penalty", -1.0),
         boundary_violation_penalty=magnitudes.get("boundary_violation_penalty", -1.0),
         last_team_reward=magnitudes.get("last_team_reward", 0.5),
+        reward_information_mode=config.get("reward_information_mode", "observation_only"),
     )

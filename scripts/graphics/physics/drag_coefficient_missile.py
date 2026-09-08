@@ -8,10 +8,10 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from paper_style import paper_figure, save_paper_figure  # noqa: E402
+from paper_style import paper_figure, save_paper_figure
 
-from bvr_marl_core.physics.missiles import MissilePhysics  # noqa: E402
-from bvr_marl_core.physics.physics import get_speed_of_sound  # noqa: E402
+from bvr_marl_core.physics.missiles import MissilePhysics
+from bvr_marl_core.physics.physics import get_speed_of_sound
 
 
 def plot_missile_cd0():

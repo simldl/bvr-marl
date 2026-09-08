@@ -2,8 +2,6 @@
 
 from typing import Any, Protocol, runtime_checkable
 
-import numpy as np
-
 
 @runtime_checkable
 class SensorPlugin(Protocol):

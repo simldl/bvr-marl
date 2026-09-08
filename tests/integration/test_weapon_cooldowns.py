@@ -1,9 +1,9 @@
 """
 Tests for WeaponCooldowns.is_target_saturated (behavior–core integration).
 
-These tests were split from bvr-marl-core/tests/simulator/test_missile_target_tracking.py
+These tests were split from bvr-marl/tests/simulator/test_missile_target_tracking.py
 because WeaponCooldowns lives in bvr_marl_core and requires bvr_marl_core installed.
-The pure-simulator registry tests remain in bvr-marl-core.
+The pure-simulator registry tests remain in bvr-marl.
 """
 
 from unittest.mock import Mock
@@ -17,7 +17,7 @@ from bvr_marl_core.simulator.core.units import Position
 from bvr_marl_core.simulator.simulator import Simulator
 
 # ---------------------------------------------------------------------------
-# Helpers (mirrors bvr-marl-core/tests/simulator/test_missile_target_tracking.py)
+# Helpers (mirrors bvr-marl/tests/simulator/test_missile_target_tracking.py)
 # ---------------------------------------------------------------------------
 
 

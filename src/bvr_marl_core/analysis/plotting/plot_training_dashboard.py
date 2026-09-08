@@ -4,13 +4,13 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from .plot_tensorboard_metric import (
-    _run_color_map,
-    _smooth,
+from bvr_marl_core.analysis.plotting.plot_tensorboard_metric import (
     labels_for_tag,
     normalize_tag,
+    run_color_map,
+    smooth_series,
 )
-from .unibw_style import set_unibw_style
+from bvr_marl_core.analysis.plotting.unibw_style import set_unibw_style
 
 # Each panel is a list of alternative canonical tags; the first one present in
 # the loaded data wins. This lets the same dashboard work across the SB3-style
@@ -35,8 +35,12 @@ TACTICAL_DASHBOARD_TAGS = [
     "tactical/team_a_missiles_fired",
     "tactical/team_a_missile_episode_rate",
     "tactical/passivity_rate",
-    # Shot quality
-    "tactical/valid_shot_rate",
+    # Shot quality. valid_shot_rate was removed: it divided launches by ALL trigger
+    # presses, so no-target spam dominated it and it read like a shooting rate while
+    # scoring trigger discipline. shot_conversion_rate conditions on a viable firing
+    # solution existing.
+    "tactical/shot_conversion_rate",
+    "tactical/shot_opportunities",
     "tactical/invalid_shot_rate",
     "tactical/shot_efficiency",
     # Terminal effect
@@ -101,7 +105,7 @@ def _plot_tag_on_ax(
 
         ax.plot(
             run_df["step"],
-            _smooth(run_df["value"], smoothing),
+            smooth_series(run_df["value"], smoothing),
             color=color,
             label=run,
         )
@@ -134,7 +138,7 @@ def plot_training_dashboard(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     runs = df["run"].unique().tolist() if not df.empty else []
-    color_map = _run_color_map(runs)
+    color_map = run_color_map(runs)
     available = set(df["tag"].unique().tolist()) if not df.empty else set()
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 8))
@@ -182,7 +186,7 @@ def plot_tactical_dashboard(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     runs = df["run"].unique().tolist() if not df.empty else []
-    color_map = _run_color_map(runs)
+    color_map = run_color_map(runs)
     available = set(df["tag"].unique().tolist()) if not df.empty else set()
 
     # Only lay out panels for tags that actually have data, so the grid stays

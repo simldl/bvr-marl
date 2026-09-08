@@ -7,7 +7,6 @@ from bvr_marl_core.missiles.guidance.pn_propnav import PnPropNavGuidance
 from bvr_marl_core.missiles.guidance.utils import (
     CircularMovingAverageFilter,
     MovingAverageFilter,
-    distance_m,
 )
 
 
@@ -175,7 +174,7 @@ class MissileGuidance:
         if callable(get_locked):
             try:
                 return get_locked() is not None
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
         return getattr(radar, "locked_target", None) is not None
 
@@ -203,10 +202,11 @@ class MissileGuidance:
                 locked_id = radar.get_locked_target()
                 if locked_id is not None:
                     allowed_ids.add(locked_id)
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
         for candidate in (
             getattr(target_provider, "current_target_id", None),
+            getattr(missile, "launch_contact_id", None),
             getattr(missile, "designated_target_id", None),
         ):
             if candidate is not None:

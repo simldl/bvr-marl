@@ -1,0 +1,142 @@
+# Opt-in example scenario exercising the workshop "general/map" capabilities.
+#
+# It is a standalone example: basic.yaml (the default 2 v 2, 200 km scenario)
+# is intentionally left unchanged. Everything new here is additive and driven by
+# config keys that default to the old behaviour when omitted:
+#   * map_size 500 km          -- room for 150-250 km detection ranges to matter
+#   * 4-ship agent team         -- the workshop's 4-ship minimum
+#   * asymmetric counts         -- num_opponents lets red differ from blue (4 v 3)
+#   * heterogeneous types       -- a list of aircraft types, assigned per slot
+#   * spawn_speed/alt ranges    -- per-episode start speed/altitude variation
+#
+# Only the env block differs from basic.yaml in ways relevant to the map/scenario;
+# the training/model/logging blocks mirror basic.yaml so it is runnable as-is.
+env:
+  num_agents_per_side: 4
+  # Asymmetric: red flies a 3-ship against blue's 4-ship.
+  num_opponents: 3
+  map_size: 500
+  max_steps: 1024
+  debug: false
+  simulation_config:
+    tick_secs: 1.0
+    max_real_time_s: null
+    early_termination:
+      all_enemies_dead: true
+      mission_complete: true
+      no_missiles_remaining: false
+  # Heterogeneous formations: a list of types is assigned per slot and cycled.
+  # Blue: an F-22 leading three F-35s. Red: mixed Su-57 / Eurofighter.
+  aircraft_config:
+    agent_type:
+    - F22
+    - F35
+    - F35
+    - F35
+    opponent_type:
+    - Su57
+    - Eurofighter
+    - Su57
+  missile_config:
+    agent_missiles:
+    - AIM120_AMRAAM
+    opponent_missiles:
+    - K77M
+  # Per-episode start variation (opt-in). Omit these to get fixed starts.
+  spawn_speed_min: 200.0
+  spawn_speed_max: 300.0
+  spawn_alt_min: 6000.0
+  spawn_alt_max: 11000.0
+  datalink_mode: full
+  scenario_config:
+    allowed_regimes:
+    - hot_160km
+    - hot_200km
+    - offset_30deg
+    randomize_regime: true
+    awacs_config:
+      agent_awacs: true
+      opponent_awacs: true
+      orbit_altitude_m: 10000
+      # Keep both AWACS pairs behind their fighters on fixed racetracks.
+      # Centres at +/-200 km leave the 40 km legs and 25 km turns inside
+      # the +/-250 km map boundary while preserving north/south separation.
+      orbit_distance_km: 200.0
+      orbit_pattern: racetrack
+      orbit_leg_length_km: 40.0
+      orbit_radius_km: 25.0
+      trail_fighters: false
+      awacs_non_engageable: true
+  num_fm: 4
+  boundary_config:
+    enable_boundary: true
+    boundary_size_km: 500
+    violation_penalty: -50.0
+  neural_wrapper_config:
+    missile_fire_threshold: 0.65
+  reward_categories:
+    terminal: true
+    tactical: true
+    energy: false
+    control: false
+    defensive: false
+  reward_magnitudes:
+    kill_reward: 200.0
+    destruction_penalty: -200.0
+    boundary_violation_penalty: -200.0
+    last_team_reward: 40.0
+    tracking_reward_scale: 0.5
+    nez_positioning_reward_scale: 1.5
+    optimal_zone_reward_scale: 0.8
+  reward_normalization:
+    enabled: false
+    clip_reward: 10.0
+framework: torch
+num_gpus: 1
+num_env_runners: 16
+num_learners: 1
+rollout_fragment_length: auto
+training:
+  steps: 2048
+  allow_auto_extend: true
+  max_extended_steps: 4096
+  learning_rate: 0.0003
+  train_batch_size: 8192
+  sgd_minibatch_size: 1024
+  num_epochs: 8
+  clip_param: 0.2
+  entropy_coef: 0.01
+  vf_loss_coeff: 0.5
+  kl_coeff: 0.2
+  gamma: 0.995
+  use_gae: true
+  lambda: 0.95
+  grad_clip: 1.0
+  multi_agent:
+    policy_mode: shared
+    shared_policy_id: shared_policy
+model:
+  use_neural_wrapper: true
+  model_config:
+    action_dim: 4
+    wrapped_action_dim: 4
+    full_action_dim: 10
+    active_indices:
+    - 0
+    - 1
+    - 2
+    - 3
+    hidden_dim: 256
+    num_hidden_layers: 2
+    activation: tanh
+    fcnet_hiddens:
+    - 256
+    - 256
+    fcnet_activation: tanh
+    free_log_std: false
+logging:
+  log_dir: logs/training
+  save_dir: models/training
+  model_name: large_map_heterogeneous
+  use_tensorboard: true
+training_mode: bvr

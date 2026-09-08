@@ -1,7 +1,5 @@
-from collections import defaultdict
-from typing import Optional
-
-import numpy as np
+import math
+from collections.abc import Mapping
 
 
 class Clusterer:
@@ -11,79 +9,98 @@ class Clusterer:
         self.angular_res_deg = angular_res_deg
         self.range_res_m = range_res_m
 
-    def cluster(self, dets: list[dict]) -> list[dict]:
+    def cluster(self, dets: list[Mapping] | tuple[Mapping, ...]) -> list[dict]:
         """Group detections whose (azimuth, elevation, range) fall into the same discrete bins."""
         if not dets:
             return []
 
-        n = len(dets)
-        az = np.empty(n, dtype=np.float32)
-        el = np.empty(n, dtype=np.float32)
-        di = np.empty(n, dtype=np.float32)
-        dop = np.empty(n, dtype=np.float32)
-        lat = np.empty(n, dtype=np.float32)
-        lon = np.empty(n, dtype=np.float32)
-        alt = np.empty(n, dtype=np.float32)
+        # Detection counts per tick are tiny (a handful per radar), so plain Python
+        # aggregation is much faster than allocating numpy arrays per call.
+        inv_ang = 1.0 / self.angular_res_deg
+        inv_rng = 1.0 / self.range_res_m
 
-        for i, d in enumerate(dets):
-            az[i] = d["az"]
-            el[i] = d["el"]
-            di[i] = d["d"]
-            dop[i] = d.get("dop", 0.0)
-            lat[i] = d.get("lat", 0.0)
-            lon[i] = d.get("lon", 0.0)
-            alt[i] = d.get("alt", 0.0)
-
-        valid = np.isfinite(az) & np.isfinite(el) & np.isfinite(di)
-        if not np.any(valid):
-            return []
-        if not np.all(valid):
-            valid_idx = np.where(valid)[0]
-            az, el, di, dop = az[valid_idx], el[valid_idx], di[valid_idx], dop[valid_idx]
-            lat, lon, alt = lat[valid_idx], lon[valid_idx], alt[valid_idx]
-            dets = [dets[i] for i in valid_idx]
-            n = len(dets)
-
-        bix = np.floor(az / self.angular_res_deg).astype(np.int32)
-        biy = np.floor(el / self.angular_res_deg).astype(np.int32)
-        biz = np.floor(di / self.range_res_m).astype(np.int32)
-
-        bin_dict = defaultdict(list)
-        for i in range(n):
-            key = (bix[i], biy[i], biz[i])
-            bin_dict[key].append(i)
+        bin_dict: dict[tuple[int, int, int], list[Mapping]] = {}
+        for d in dets:
+            az = float(d["az"])
+            el = float(d["el"])
+            di = float(d["d"])
+            if not (math.isfinite(az) and math.isfinite(el) and math.isfinite(di)):
+                continue
+            key = (
+                math.floor(az * inv_ang),
+                math.floor(el * inv_ang),
+                math.floor(di * inv_rng),
+            )
+            members = bin_dict.get(key)
+            if members is None:
+                bin_dict[key] = [d]
+            else:
+                members.append(d)
 
         clusters = []
-        for sel_list in bin_dict.values():
-            # Aggregate ECM fields from detections
-            is_deception = any(dets[j].get("is_deception", False) for j in sel_list)
-            engagement_ids = [
-                dets[j].get("engagement_id")
-                for j in sel_list
-                if dets[j].get("engagement_id") is not None
-            ]
-            jammer_ids = [
-                dets[j].get("jammer_id") for j in sel_list if dets[j].get("jammer_id") is not None
-            ]
+        for members in bin_dict.values():
+            m = len(members)
+            az_sum = el_sum = d_sum = dop_sum = lat_sum = lon_sum = alt_sum = 0.0
+            is_deception = False
+            engagement_ids = []
+            jammer_ids = []
+            t_list = []
+            report_ids = []
+            source_ids = []
+            report_lineage = []
+            acquisition_times = []
+            for d in members:
+                az_sum += float(d["az"])
+                el_sum += float(d["el"])
+                d_sum += float(d["d"])
+                dop_sum += float(d.get("dop", 0.0))
+                lat_sum += float(d.get("lat", 0.0))
+                lon_sum += float(d.get("lon", 0.0))
+                alt_sum += float(d.get("alt", 0.0))
+                if d.get("is_deception", False):
+                    is_deception = True
+                eid = d.get("engagement_id")
+                if eid is not None:
+                    engagement_ids.append(eid)
+                jid = d.get("jammer_id")
+                if jid is not None:
+                    jammer_ids.append(jid)
+                t_list.append(d.get("T", None))
+                if d.get("report_id") is not None:
+                    report_ids.append(int(d["report_id"]))
+                if d.get("source_id") is not None:
+                    source_ids.append(d["source_id"])
+                lineage = d.get("report_lineage")
+                if lineage:
+                    report_lineage.extend(lineage)
+                elif d.get("source_id") is not None and d.get("report_id") is not None:
+                    report_lineage.append((d["source_id"], int(d["report_id"])))
+                if d.get("acquisition_time_s") is not None:
+                    acquisition_times.append(float(d["acquisition_time_s"]))
 
             engagement_id = (
                 max(set(engagement_ids), key=engagement_ids.count) if engagement_ids else None
             )
             jammer_id = max(set(jammer_ids), key=jammer_ids.count) if jammer_ids else None
 
-            sel_arr = np.array(sel_list, dtype=np.int32)
             cluster = {
-                "az": float(az[sel_arr].mean()),
-                "el": float(el[sel_arr].mean()),
-                "d": float(di[sel_arr].mean()),
-                "dop": float(dop[sel_arr].mean()),
-                "lat": float(lat[sel_arr].mean()),
-                "lon": float(lon[sel_arr].mean()),
-                "alt": float(alt[sel_arr].mean()),
-                "T": [dets[j].get("T", None) for j in sel_list],
+                "az": az_sum / m,
+                "el": el_sum / m,
+                "d": d_sum / m,
+                "dop": dop_sum / m,
+                "lat": lat_sum / m,
+                "lon": lon_sum / m,
+                "alt": alt_sum / m,
+                "T": t_list,
                 "is_deception": is_deception,
                 "engagement_id": engagement_id,
                 "jammer_id": jammer_id,
+                "report_ids": tuple(report_ids),
+                "source_ids": tuple(sorted(set(source_ids), key=str)),
+                "report_lineage": tuple(
+                    sorted(set(report_lineage), key=lambda item: (str(item[0]), item[1]))
+                ),
+                "acquisition_time_s": max(acquisition_times) if acquisition_times else None,
             }
 
             # Never set 'T' on deception clusters (enforce no trusted data on ghosts)

@@ -14,6 +14,8 @@ class LongRangeMissile(Missile):
             "max_speed_mps": 1500.0,
             "motor_burn_s": 32.0,
             "min_range_m": 2000.0,
+            # Generic long-range kinematic max (anchors the DLZ).
+            "max_range_m": 150_000.0,
             "seeker_sensitivity": 1.3,
             "life_time_s": 220.0,
             "hit_probability": 0.90,

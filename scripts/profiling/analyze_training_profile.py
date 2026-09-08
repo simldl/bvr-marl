@@ -104,7 +104,8 @@ def analyze_training_profile():
 
     stats.sort_stats("cumulative")
 
-    for func, data in list(stats.stats.items())[:20]:
+    for func in stats.fcn_list[:20]:
+        data = stats.stats[func]
         file_name = func[0]
         func_name = func[2]
         ncalls = data[0]
@@ -126,7 +127,8 @@ def analyze_training_profile():
 
     stats.sort_stats("tottime")
 
-    for func, data in list(stats.stats.items())[:20]:
+    for func in stats.fcn_list[:20]:
+        data = stats.stats[func]
         file_name = func[0]
         func_name = func[2]
         ncalls = data[0]

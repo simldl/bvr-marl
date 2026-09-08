@@ -1,6 +1,6 @@
-"""Configuration loading utilities for bvr-marl-core.
+"""Configuration loading utilities for bvr-marl.
 
-All config search roots are anchored to the bvr-marl-core package layout.
+All config search roots are anchored to the bvr-marl package layout.
 The neutral path helper ``resolve_relative_path`` is re-exported from
 ``bvr_marl_core.utils`` for callers that expect to find it here.
 """

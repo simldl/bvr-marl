@@ -74,15 +74,16 @@ def test_awacs_radar_characteristics():
     assert config.radar_horizontal_fov_deg == 360.0
     assert config.radar_vertical_fov_deg == 60.0
 
-    # Should have very long range
-    assert config.radar_max_range_m == 400000.0
+    # Less-potent surveillance system: the workshop replaced one 400 km AWACS with
+    # two ~250 km 360-degree platforms per team.
+    assert config.radar_max_range_m == 250000.0
 
     # Should use S-band for better range
     assert config.radar_frequency_hz == 3.0e9
 
-    # Should have high power
-    assert config.radar_tx_power_w == 100e3
-    assert config.radar_antenna_gain_db == 45.0
+    # Reduced power/gain relative to the old single super-AWACS
+    assert config.radar_tx_power_w == 25e3
+    assert config.radar_antenna_gain_db == 40.0
 
     # Should have low detection threshold (high sensitivity)
     assert config.radar_snr_threshold_db == 6.0
@@ -286,11 +287,12 @@ def test_awacs_realistic_mass():
 
 
 def test_awacs_realistic_radar_range():
-    """Test AWACS radar range is realistic."""
+    """Test AWACS radar range is realistic for the less-potent split system."""
     config = AWACS.Config()
 
-    # Real AWACS can detect fighter-sized targets at 400+ km
-    assert config.radar_max_range_m >= 350_000
+    # Two less-potent ~250 km 360-degree systems replace the single 400 km AWACS;
+    # still a long surveillance reach, well beyond fighter radars.
+    assert 200_000 <= config.radar_max_range_m <= 300_000
 
 
 def test_awacs_realistic_service_ceiling():

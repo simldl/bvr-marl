@@ -6,14 +6,12 @@ Real-time monitoring of running training jobs with progress tracking.
 
 import json
 import os
-import queue
 import re
 import subprocess
-import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import psutil
 import streamlit as st
@@ -197,7 +195,7 @@ class TrainingMonitor:
                     # Process just died — capture exit code and failure reason
                     try:
                         process.exit_code = psutil_process.wait(timeout=1)
-                    except Exception:
+                    except psutil.Error:
                         pass
                     process.failure_reason = self._capture_failure_reason(process)
             except psutil.NoSuchProcess:
@@ -314,7 +312,7 @@ class TrainingMonitor:
 
             process.last_update = datetime.now()
 
-        except Exception:
+        except (OSError, AttributeError, ValueError, IndexError, KeyError):
             pass
 
     def terminate_process(self, pid: int) -> bool:
@@ -429,155 +427,183 @@ def render_training_monitor():
 
 def render_process_card(process: TrainingProcess, monitor: TrainingMonitor, is_dead: bool = False):
     """Render a card for a single training process."""
-    # Calculate runtime
-    runtime = datetime.now() - process.start_time
-    runtime_str = str(runtime).split(".")[0]  # Remove microseconds
-
-    # Status indicator
+    runtime_str = _runtime_label(process.start_time)
     status_text = "Running" if process.is_alive else "Stopped"
 
     with st.container():
-        # Create a border using columns and styling
-        st.markdown(
-            f"""
-        <div style="
-            border: 1px solid {"#28a745" if process.is_alive else "#dc3545"};
-            border-radius: 10px;
-            padding: 15px;
-            margin: 10px 0;
-            background-color: {"rgba(40, 167, 69, 0.05)" if process.is_alive else "rgba(220, 53, 69, 0.05)"};
-        ">
-        </div>
-        """,
-            unsafe_allow_html=True,
-        )
+        _render_process_border(process.is_alive)
+        _render_process_header(process, monitor, is_dead, status_text, runtime_str)
+        _render_process_metrics(process)
+        _render_process_progress(process)
+        _render_process_last_update(process)
+        _render_process_log_controls(process, is_dead)
+        _render_process_command(process)
+        _render_process_failure_output(process, is_dead)
 
-        # Process header
-        col1, col2, col3 = st.columns([3, 1, 1])
 
-        with col1:
-            st.markdown(f"**{process.model_name}** ({status_text})")
-            st.caption(
-                f"PID: {process.pid} | Config: {process.config_name} | Runtime: {runtime_str}"
+def _runtime_label(start_time: datetime) -> str:
+    return str(datetime.now() - start_time).split(".")[0]
+
+
+def _render_process_border(is_alive: bool) -> None:
+    st.markdown(
+        f"""
+    <div style="
+        border: 1px solid {"#28a745" if is_alive else "#dc3545"};
+        border-radius: 10px;
+        padding: 15px;
+        margin: 10px 0;
+        background-color: {"rgba(40, 167, 69, 0.05)" if is_alive else "rgba(220, 53, 69, 0.05)"};
+    ">
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_process_header(
+    process: TrainingProcess,
+    monitor: TrainingMonitor,
+    is_dead: bool,
+    status_text: str,
+    runtime_str: str,
+) -> None:
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        st.markdown(f"**{process.model_name}** ({status_text})")
+        st.caption(f"PID: {process.pid} | Config: {process.config_name} | Runtime: {runtime_str}")
+    with col2:
+        _render_stop_button(process, monitor, is_dead)
+    with col3:
+        _render_progress_metric(process)
+
+
+def _render_stop_button(
+    process: TrainingProcess,
+    monitor: TrainingMonitor,
+    is_dead: bool,
+) -> None:
+    if is_dead or not process.is_alive:
+        return
+    if st.button(
+        "Stop",
+        key=f"stop_{process.pid}",
+        help="Terminates the training process and all child processes (Ray workers etc.)",
+    ):
+        with st.spinner("Stopping all processes in tree…"):
+            if monitor.terminate_process(process.pid):
+                st.success(f"Stopped job {process.pid}")
+                st.rerun()
+            else:
+                st.error(f"Failed to stop job {process.pid}")
+
+
+def _render_progress_metric(process: TrainingProcess) -> None:
+    if process.total_steps > 0:
+        progress = min(100, (process.current_step / process.total_steps) * 100)
+        st.metric("Progress", f"{progress:.1f}%")
+    else:
+        st.metric("Step", f"{process.current_step:,}")
+
+
+def _render_process_metrics(process: TrainingProcess) -> None:
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        if process.mean_episode_reward != 0:
+            st.metric(
+                "Mean Reward",
+                f"{process.mean_episode_reward:.2f}",
+                help="Average episode reward",
             )
+        else:
+            st.metric("Mean Reward", "N/A")
+    with col2:
+        if process.loss != 0:
+            st.metric("Loss", f"{process.loss:.4f}", help="Current training loss")
+        else:
+            st.metric("Loss", "N/A")
+    with col3:
+        if process.learning_rate != 0:
+            st.metric("Learning Rate", f"{process.learning_rate:.2e}", help="Current learning rate")
+        else:
+            st.metric("Learning Rate", "N/A")
+    with col4:
+        if process.fps > 0:
+            st.metric("FPS", f"{process.fps:.1f}", help="Training frames per second")
+        else:
+            st.metric("FPS", "N/A")
 
-        with col2:
-            if not is_dead and process.is_alive:
-                if st.button(
-                    "Stop",
-                    key=f"stop_{process.pid}",
-                    help="Terminates the training process and all child processes (Ray workers etc.)",
-                ):
-                    with st.spinner("Stopping all processes in tree…"):
-                        if monitor.terminate_process(process.pid):
-                            st.success(f"Stopped job {process.pid}")
-                            st.rerun()
-                        else:
-                            st.error(f"Failed to stop job {process.pid}")
 
-        with col3:
-            # Progress percentage
-            if process.total_steps > 0:
-                progress = min(100, (process.current_step / process.total_steps) * 100)
-                st.metric("Progress", f"{progress:.1f}%")
-            else:
-                st.metric("Step", f"{process.current_step:,}")
+def _render_process_progress(process: TrainingProcess) -> None:
+    if process.total_steps > 0:
+        progress = min(1.0, process.current_step / process.total_steps)
+        st.progress(progress)
+        st.caption(f"Step {process.current_step:,} / {process.total_steps:,}")
+    elif process.current_step > 0:
+        st.caption(f"Step {process.current_step:,}")
 
-        # Progress metrics
-        col1, col2, col3, col4 = st.columns(4)
 
-        with col1:
-            if process.mean_episode_reward != 0:
-                st.metric(
-                    "Mean Reward",
-                    f"{process.mean_episode_reward:.2f}",
-                    help="Average episode reward",
-                )
-            else:
-                st.metric("Mean Reward", "N/A")
+def _render_process_last_update(process: TrainingProcess) -> None:
+    if not process.last_update:
+        return
+    time_since_update = datetime.now() - process.last_update
+    if time_since_update.total_seconds() < 60:
+        update_str = f"{int(time_since_update.total_seconds())}s ago"
+    else:
+        update_str = f"{int(time_since_update.total_seconds() // 60)}m ago"
+    st.caption(f"Last update: {update_str}")
 
-        with col2:
-            if process.loss != 0:
-                st.metric("Loss", f"{process.loss:.4f}", help="Current training loss")
-            else:
-                st.metric("Loss", "N/A")
 
-        with col3:
-            if process.learning_rate != 0:
-                st.metric(
-                    "Learning Rate", f"{process.learning_rate:.2e}", help="Current learning rate"
-                )
-            else:
-                st.metric("Learning Rate", "N/A")
+def _render_process_log_controls(process: TrainingProcess, is_dead: bool) -> None:
+    if not process.log_file:
+        return
+    log_path = Path(process.log_file)
+    col_log1, col_log2 = st.columns([3, 1])
+    with col_log1:
+        st.caption(f"Log: `{process.log_file}`")
+    with col_log2:
+        if st.button(
+            "Open Log",
+            key=f"open_log_{process.pid}",
+            width="stretch",
+            help="Open log file in system editor",
+        ):
+            _open_log_path(log_path)
 
-        with col4:
-            if process.fps > 0:
-                st.metric("FPS", f"{process.fps:.1f}", help="Training frames per second")
-            else:
-                st.metric("FPS", "N/A")
+    if log_path.exists():
+        _render_log_tail(log_path, is_dead)
 
-        # Progress bar
-        if process.total_steps > 0:
-            progress = min(1.0, process.current_step / process.total_steps)
-            st.progress(progress)
-            st.caption(f"Step {process.current_step:,} / {process.total_steps:,}")
-        elif process.current_step > 0:
-            st.caption(f"Step {process.current_step:,}")
 
-        # Last update time
-        if process.last_update:
-            time_since_update = datetime.now() - process.last_update
-            if time_since_update.total_seconds() < 60:
-                update_str = f"{int(time_since_update.total_seconds())}s ago"
-            else:
-                update_str = f"{int(time_since_update.total_seconds() // 60)}m ago"
-            st.caption(f"Last update: {update_str}")
+def _open_log_path(log_path: Path) -> None:
+    if not log_path.exists():
+        st.warning("Log file not found yet.")
+        return
+    if os.name == "nt":
+        os.startfile(str(log_path))
+    else:
+        subprocess.Popen(["xdg-open", str(log_path)])
 
-        # Log file controls
-        if process.log_file:
-            log_path = Path(process.log_file)
-            col_log1, col_log2 = st.columns([3, 1])
-            with col_log1:
-                st.caption(f"Log: `{process.log_file}`")
-            with col_log2:
-                if st.button(
-                    "Open Log",
-                    key=f"open_log_{process.pid}",
-                    width="stretch",
-                    help="Open log file in system editor",
-                ):
-                    if log_path.exists():
-                        if os.name == "nt":
-                            os.startfile(str(log_path))
-                        else:
-                            import subprocess as _sp
 
-                            _sp.Popen(["xdg-open", str(log_path)])
-                    else:
-                        st.warning("Log file not found yet.")
+def _render_log_tail(log_path: Path, is_dead: bool) -> None:
+    with st.expander("Log Output (last 30 lines)", expanded=is_dead):
+        try:
+            with open(log_path, encoding="utf-8", errors="ignore") as f:
+                raw = f.read()
+            cleaned = raw.replace("\r", "\n")
+            lines = [ln for ln in cleaned.splitlines() if ln.strip()]
+            st.code("\n".join(lines[-30:]), language="text")
+        except Exception as e:
+            st.warning(f"Could not read log: {e}")
 
-            # Live log tail — auto-expanded when job is dead so output is immediately visible
-            if log_path.exists():
-                with st.expander("Log Output (last 30 lines)", expanded=is_dead):
-                    try:
-                        with open(log_path, encoding="utf-8", errors="ignore") as f:
-                            raw = f.read()
-                        # Replace \r with \n so carriage-return lines display clearly
-                        cleaned = raw.replace("\r", "\n")
-                        lines = [ln for ln in cleaned.splitlines() if ln.strip()]
-                        tail = "\n".join(lines[-30:])
-                        st.code(tail, language="text")
-                    except Exception as e:
-                        st.warning(f"Could not read log: {e}")
 
-        # Command details (expandable)
-        with st.expander("Command Details"):
-            st.code(process.command, language="bash")
+def _render_process_command(process: TrainingProcess) -> None:
+    with st.expander("Command Details"):
+        st.code(process.command, language="bash")
 
-        # Failure reason (dead processes only)
-        if is_dead and process.failure_reason and not process.log_file:
-            exit_label = (
-                f" (exit code {process.exit_code})" if process.exit_code is not None else ""
-            )
-            with st.expander(f"Failure Output{exit_label}", expanded=True):
-                st.code(process.failure_reason, language="text")
+
+def _render_process_failure_output(process: TrainingProcess, is_dead: bool) -> None:
+    if not (is_dead and process.failure_reason and not process.log_file):
+        return
+    exit_label = f" (exit code {process.exit_code})" if process.exit_code is not None else ""
+    with st.expander(f"Failure Output{exit_label}", expanded=True):
+        st.code(process.failure_reason, language="text")

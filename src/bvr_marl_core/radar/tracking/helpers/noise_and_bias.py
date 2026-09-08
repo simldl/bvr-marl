@@ -2,12 +2,12 @@ import math
 
 import numpy as np
 
-from bvr_marl_core.radar.tracking.filter.filters import ConstantVelocityKFFilter
+from bvr_marl_core.radar.tracking.filter.base_filter import BaseKFFilter
 
 Z_BIAS_ALPHA = 0.02
 
 
-def apply_anisotropic_R(self, meta, tracker: ConstantVelocityKFFilter, meas_enu, cluster):
+def apply_anisotropic_R(self, meta, tracker: BaseKFFilter, meas_enu, cluster):
     """
     Set measurement covariance on the tracker, based on the *source* of the measurement*.
 
@@ -16,14 +16,52 @@ def apply_anisotropic_R(self, meta, tracker: ConstantVelocityKFFilter, meas_enu,
 
     This avoids the previous sensitivity of R to recentering choice.
     """
+    common_frame_covariance = cluster.get("covariance_cartesian")
+    if common_frame_covariance is not None:
+        covariance = np.asarray(common_frame_covariance, dtype=float)
+        measurement_ref = cluster.get("measurement_ref")
+        track_ref = cluster.get("track_ref")
+        if measurement_ref is not None and track_ref is not None:
+            from bvr_marl_core.radar.tracking.helpers.enu_utils import enu_rotation
+
+            rotation = enu_rotation(
+                measurement_ref.lat,
+                measurement_ref.lon,
+                track_ref.lat,
+                track_ref.lon,
+            )
+            covariance = rotation @ covariance @ rotation.T
+        tracker.set_measurement_covariance(covariance)
+        meta["meas_source"] = "common_frame_fusion"
+        return
+
+    # Noise-jammer strobes (checked before the datalink/GT branch, since jammer
+    # clusters still carry T for identity). A bearing-only strobe has an unknown
+    # range -> large, near-isotropic position uncertainty; a cross-radar
+    # triangulated fix is usable but coarser than a clean skin/datalink track.
+    if cluster.get("range_denied", False):
+        # Bearing-only: the range is unknown, so keep the position uncertainty very
+        # large and near-isotropic. (The filter update uses only the diagonal of R,
+        # so a proper LOS-aligned covariance is not represented; this large
+        # isotropic value keeps the track honestly low-confidence instead of
+        # letting a repeated nominal-range guess collapse it.)
+        tracker.set_measurement_std((60_000.0, 60_000.0, 60_000.0))
+        meta["meas_source"] = "jam_strobe"
+        return
+    if cluster.get("triangulated", False):
+        tracker.set_measurement_std((1500.0, 1500.0, 1500.0))
+        meta["meas_source"] = "triangulated"
+        return
+
     if cluster.get("T") is not None and hasattr(cluster["T"], "position"):
         tracker.set_measurement_std((5.0, 5.0, 5.0))
         meta["meas_source"] = "datalink"
         return
 
     d = float(cluster.get("d", np.hypot(float(meas_enu[0]), float(meas_enu[1]))))
-    range_res_m = float(getattr(self, "range_resolution_m", 150.0))
-    ang_res_rad = math.radians(float(getattr(self, "angular_resolution_deg", 2.0)))
+    # self is the TrackerManager, which always sets these in __init__ (per-measurement hot path).
+    range_res_m = float(self.range_resolution_m)
+    ang_res_rad = math.radians(float(self.angular_resolution_deg))
 
     sigma_xy = max(0.5 * range_res_m, 0.5 * ang_res_rad * d)
     sigma_z = max(10.0, 0.25 * range_res_m)
@@ -36,9 +74,7 @@ def apply_anisotropic_R(self, meta, tracker: ConstantVelocityKFFilter, meas_enu,
     meta["meas_source"] = "radar"
 
 
-def apply_z_bias_correction(
-    meta: dict, tracker: ConstantVelocityKFFilter, meas_enu: np.ndarray
-) -> np.ndarray:
+def apply_z_bias_correction(meta: dict, tracker: BaseKFFilter, meas_enu: np.ndarray) -> np.ndarray:
     """
     Apply z-bias correction using exponentially weighted moving average (EWMA).
 
@@ -67,7 +103,7 @@ def apply_z_bias_correction(
 
 
 def apply_xy_bias_correction(
-    meta: dict, tracker: ConstantVelocityKFFilter, meas_enu: np.ndarray, alpha: float = 0.01
+    meta: dict, tracker: BaseKFFilter, meas_enu: np.ndarray, alpha: float = 0.01
 ) -> np.ndarray:
     """
     Track and remove a small fixed lateral (E/N) bias via EWMA of the innovations.

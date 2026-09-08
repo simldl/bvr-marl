@@ -6,19 +6,24 @@ from bvr_marl_core.aircraft.control.countermeasure import AircraftCountermeasure
 from bvr_marl_core.aircraft.control.movement_control import AircraftControlSystem
 from bvr_marl_core.aircraft.control.weapon_system import AircraftWeaponSystem
 from bvr_marl_core.aircraft.core.nez import NoEscapeZoneCalculator
+from bvr_marl_core.aircraft.systems.fuel import FuelSystem
 from bvr_marl_core.aircraft.systems.sensor import AircraftSensorSystem
 from bvr_marl_core.missiles.missile_parameters import MissileParameters
 from bvr_marl_core.physics.aircraft import AircraftPhysics
 from bvr_marl_core.radar.core.data_link import DataLink
 from bvr_marl_core.radar.obs.observation import DEFAULT_NOTCH_VELOCITY_MPS
 from bvr_marl_core.radar.units.aircraft import AircraftRadar
-from bvr_marl_core.simulator.core.events import Event
+from bvr_marl_core.simulator.core.events import AircraftDestroyedEvent, Event
 from bvr_marl_core.simulator.core.units import FlyingUnit
 from bvr_marl_core.simulator.simulator import Simulator
 
 
 class Aircraft(FlyingUnit):
     unit_kind: str = "aircraft"
+    # Target-vulnerability class used by the kill model's VulnerabilityModel.
+    # Subclasses override (e.g. AWACS -> "awacs"); a config "vulnerability_class"
+    # key overrides per instance.
+    vulnerability_class: str = "fighter"
 
     def __init__(self, name, position, yaw_deg, speed_mps, group, map_limits, config):
         super().__init__(name=name, position=position, yaw_deg=yaw_deg, speed=speed_mps)
@@ -29,6 +34,11 @@ class Aircraft(FlyingUnit):
 
         self.should_be_removed = False
         self.removal_reason = None
+        # Stochastic kill delay: set when a lethal missile hit lands. The aircraft
+        # spirals out of the fight and dies (event + removal) at _death_time_s.
+        self.is_mortally_hit = False
+        self._death_time_s = None
+        self._death_killer = None
         self.boundary_violation_active = False
         self.boundary_violation_countdown = 0
         self.boundary_violation_penalty_per_step = -10.0
@@ -36,6 +46,10 @@ class Aircraft(FlyingUnit):
         if hasattr(config, "__dataclass_fields__"):
             config = asdict(config)
         self.config = config
+
+        # Resolve the vulnerability class: explicit config override, else the
+        # subclass default. Instance attribute so it travels with the unit.
+        self.vulnerability_class = config.get("vulnerability_class", type(self).vulnerability_class)
 
         cfg_mass = config.get("mass_kg", 20000.0)
         cfg_Sref = config.get("reference_area_m2", 27.87)
@@ -80,7 +94,43 @@ class Aircraft(FlyingUnit):
             meas_range_noise_m=config.get("radar_meas_range_noise_m", 0.0),
             dl_delay_base_s=config.get("radar_dl_delay_base_s", 0.0),
             dl_delay_per_km_s=config.get("radar_dl_delay_per_km_s", 0.0),
+            processing_gain_db=config.get("radar_processing_gain_db", 30.0),
+            tracker_motion_model=config.get("radar_tracker_motion_model", "cv"),
         )
+
+        # EMCON: when False the radar is silent — it emits no active detections
+        # (the agent must rely on the datalink picture) and cannot be seen by an
+        # enemy RWR/passive receiver. Driven by the radar on/off action each tick.
+        self.radar_emitting = True
+        # Per-episode radar-emission statistics (duty cycle / toggles) for the
+        # active-sensing observation and the sensing Pareto analysis. Fresh per
+        # episode because units are re-spawned on reset.
+        from bvr_marl_core.aircraft.systems.emission_tracker import EmissionTracker
+
+        self.emission_tracker = EmissionTracker()
+
+        # Noise-jammer capability (self-protection). Nominal burn-through range in km
+        # against a reference radar (see radar/ew/noise_jammer.py); 0 = no jammer.
+        # When >0 the aircraft denies range to any enemy radar beyond that radar's
+        # (geometry-scaled) burn-through range. Default off so existing configs are
+        # unchanged; enable per aircraft type or scenario to turn on EW.
+        self.noise_jammer_burn_through_km = float(config.get("noise_jammer_burn_through_km", 0.0))
+
+        # Infrared Search & Track: a passive, angle-only IR sensor. Present only
+        # when irst_base_range_m > 0 (e.g. the F-22 omits an IRST). Uses the radar's
+        # RNG for measurement noise so a seed reproduces both.
+        irst_range = float(config.get("irst_base_range_m", 0.0))
+        self.irst = None
+        if irst_range > 0.0:
+            from bvr_marl_core.aircraft.systems.irst import IRSTSensor
+
+            self.irst = IRSTSensor(
+                self,
+                fov_deg=float(config.get("irst_fov_deg", 140.0)),
+                base_range_m=irst_range,
+                angular_noise_deg=float(config.get("irst_angular_noise_deg", 0.4)),
+                np_rng=getattr(self.radar, "np_rng", None),
+            )
 
         self.rcs = config.get("rcs", 10.0)
         self.rcs_pattern = self.config.get(
@@ -104,10 +154,26 @@ class Aircraft(FlyingUnit):
         self.missile_warning_delay_s = config.get("missile_warning_delay_s", 1.0)
         self.missile_warning_delay_std = config.get("missile_warning_delay_std", 0.5)
 
+        # Countermeasure inventory (read by AircraftCountermeasureSystem at
+        # construction, so it must be set first). Without this the counts defaulted
+        # to 0 and no countermeasure could ever be launched.
+        self.flares = config.get("flares", 0)
+        self.chaff = config.get("chaff", 0)
+        self.ecm = config.get("ecm", 0)
+        self.decoys = config.get("decoys", 0)
+
         self.sensor = AircraftSensorSystem(self)
         self.control = AircraftControlSystem(self)
         self.weapons = AircraftWeaponSystem(self)
         self.countermeasures = AircraftCountermeasureSystem(self)
+
+        # Fuel: mass_kg is the full-fuel flying mass, so empty = mass - fuel and a
+        # full tank reproduces the previous fixed mass at spawn. Capacity 0 disables
+        # fuel (fixed mass, no depletion). Empty mass is floored so a spent jet is
+        # not unrealistically light.
+        fuel_capacity_kg = float(config.get("fuel_capacity_kg", 0.0))
+        empty_mass_kg = max(0.5 * cfg_mass, cfg_mass - fuel_capacity_kg)
+        self.fuel = FuelSystem(self, fuel_capacity_kg, empty_mass_kg)
 
         self.weapon_lock_threshold_km = config.get(
             "weapon_lock_threshold_km",
@@ -139,12 +205,12 @@ class Aircraft(FlyingUnit):
         if hasattr(self, "sensor") and self.sensor is not None:
             try:
                 return set(self.sensor.get_locked_targets() or [])
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
         if hasattr(self, "radar") and self.radar is not None:
             try:
                 return set(self.radar.get_locked_targets() or [])
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
         return set()
 
@@ -169,8 +235,47 @@ class Aircraft(FlyingUnit):
             self.weapons.remaining_missiles = remaining
 
     def update(self, tick_secs: float, sim: Simulator) -> list[Event]:
+        if not self.is_mortally_hit:
+            self.sensor.update_sensor_data(sim, tick_secs)
+        return self.update_after_staged_sensors(tick_secs, sim)
+
+    def stage_sensor_reports(self, tick_secs: float, sim: Simulator) -> None:
+        """Generate raw reports only; peer reports are not consumed in this phase."""
+        if not self.is_mortally_hit and not self.should_be_removed:
+            self.sensor.stage_sensor_reports(sim, tick_secs)
+
+    def update_staged_sensor_products(self, tick_secs: float, sim: Simulator) -> None:
+        """Fuse the globally frozen report set into this aircraft's local picture."""
+        if not self.is_mortally_hit and not self.should_be_removed:
+            self.sensor.update_from_staged_reports(sim, tick_secs)
+
+    def update_after_staged_sensors(self, tick_secs: float, sim: Simulator) -> list[Event]:
+        """Advance aircraft dynamics after every platform has published sensor products."""
+        # Stochastic kill delay: once the scheduled death time arrives, fire the
+        # (deferred) kill event so the shot is credited, then remove the wreck.
+        if self.is_mortally_hit and not self.should_be_removed:
+            now = float(getattr(sim, "elapsed_time_s", 0.0))
+            if self._death_time_s is not None and now >= float(self._death_time_s):
+                sim.log_event(AircraftDestroyedEvent(sim, self._death_killer, self))
+                self.should_be_removed = True
+                self.removal_reason = "missile_kill"
+                return []
+            # DYING aircraft retain only uncontrolled flight dynamics. They do
+            # not receive a normal sensor update or re-enter tactical control.
+            self.control.update_movement(tick_secs)
+            self._publish_tick_path(sim)
+            return []
+
         self.control.update_movement(tick_secs)
-        self.sensor.update_sensor_data(sim, tick_secs)
+        self._publish_tick_path(sim)
+
+        # Fuel exhaustion: a flamed-out jet glides (thrust cut in movement) and is
+        # lost once it has descended to the altitude floor — a fuel-starvation crash.
+        if getattr(self, "fuel", None) is not None and self.fuel.flamed_out:
+            if self.position.alt <= self.min_alt_m + 50.0:
+                self.should_be_removed = True
+                if self.removal_reason is None:
+                    self.removal_reason = "out_of_fuel"
 
         if self.boundary_violation_active:
             self.boundary_violation_countdown -= 1
@@ -178,6 +283,19 @@ class Aircraft(FlyingUnit):
                 self.should_be_removed = True
 
         return []
+
+    def _publish_tick_path(self, sim) -> None:
+        """Expose the path just flown, stamped with the tick it belongs to.
+
+        Missiles integrate after aircraft within a tick's dynamics stage (the
+        roster is sorted with missiles last), so a missile reading this gets the
+        current tick's real arc. The timestamp is what makes that safe: an
+        aircraft skipped during a tick keeps a stale path, and a consumer must be
+        able to tell. TickStateBuffer copies only position and the kinematic
+        scalars, so these two attributes survive its restore/publish cycle.
+        """
+        self.tick_path = self.control.tick_path
+        self.tick_path_time_s = float(getattr(sim, "elapsed_time_s", 0.0))
 
     def get_state_representation(self):
         state = {
@@ -223,12 +341,17 @@ class Aircraft(FlyingUnit):
         return state
 
     def apply_rl_action(self, action: np.ndarray, simulator: Simulator):
-        # Allow shorter action vectors by padding with zeros
-        a = np.zeros(10, dtype=float)
-        if isinstance(action, np.ndarray):
-            a[: min(len(action), 10)] = action[: min(len(action), 10)]
+        # EMCON radar toggle (index 9, when present); silent only in the top
+        # quartile so the radar stays ON by default.
+        if isinstance(action, np.ndarray) and len(action) > 9:
+            self.radar_emitting = bool(float(action[9]) < 0.75)
 
-        self.control.set_throttle(np.clip(a[0], 0.0, 1.0))
+        # Allow shorter action vectors by padding with zeros
+        a = np.zeros(9, dtype=float)
+        if isinstance(action, np.ndarray):
+            a[: min(len(action), 9)] = action[: min(len(action), 9)]
+
+        self.control.set_throttle(min(max(float(a[0]), 0.0), 1.0))
 
         yaw_deg_change = (a[1] * 2.0 - 1.0) * 180.0
         pitch_deg_change = (a[2] * 2.0 - 1.0) * 90.0
@@ -237,8 +360,8 @@ class Aircraft(FlyingUnit):
 
         self.target = self.weapons.select_and_engage_target(
             self._get_target_candidates(simulator),
-            a[3],  # target_selector
-            a[4],  # fire_action (missile)
+            a[4],  # target_selector
+            a[3],  # fire_action (missile)
             a[5],  # gun_fire_action
             simulator,
         )
@@ -248,8 +371,6 @@ class Aircraft(FlyingUnit):
         if a[7] > 0.5:
             self.countermeasures.launch_chaff(simulator)
         if a[8] > 0.5:
-            self.countermeasures.activate_ecm()
-        if a[9] > 0.5:
             self.countermeasures.deploy_decoys(simulator)
 
         self.countermeasures.cleanup_expired_countermeasures()

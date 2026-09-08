@@ -1,5 +1,5 @@
 """
-SimplifiedMultiAgentEnv — lightweight training environment.
+SimpleOracleEnv — lightweight oracle/debug/curriculum environment.
 
 Differences from BVRMultiAgentEnv:
   - No AWACS units.
@@ -10,14 +10,14 @@ Differences from BVRMultiAgentEnv:
   - No gun, no countermeasures.
 
 All other components (physics, reward, termination, spawning) are shared with
-the full environment to keep the simplified env consistent.
+the full environment.  Because observations and target selection use truth,
+this environment is excluded from sensor-limited evaluation claims.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 from gymnasium.spaces.utils import flatten as _gym_flatten
@@ -173,9 +173,9 @@ class SimplifiedConfig:
         }
 
 
-class SimplifiedMultiAgentEnv(BaseMultiAgentEnv):
+class SimpleOracleEnv(BaseMultiAgentEnv):
     """
-    Lightweight multi-agent air combat environment.
+    Lightweight truth-observing environment for debugging and curricula.
 
     Observation keys (per agent):
         own_state              (7,)
@@ -193,6 +193,11 @@ class SimplifiedMultiAgentEnv(BaseMultiAgentEnv):
 
     def __init__(self, config: dict):
         super().__init__(config)
+
+        # Machine-readable labels prevent callers from mistaking this fast
+        # truth-observing curriculum for the production sensor-limited path.
+        self.information_mode = "oracle"
+        self.result_label = "oracle_upper_bound"
 
         self.simplified_cfg = SimplifiedConfig.from_dict(config)
         bvr_dict = self.simplified_cfg.to_bvr_config_dict()
@@ -284,7 +289,6 @@ class SimplifiedMultiAgentEnv(BaseMultiAgentEnv):
             aid: self._per_agent_flat_space for aid in self.bvr_config.all_agent_ids
         }
 
-        # IDs
         self.agent_ids = self.bvr_config.agent_ids
         self.opponent_ids = self.bvr_config.opponent_ids
         self.all_agent_ids = self.bvr_config.all_agent_ids
@@ -358,7 +362,6 @@ class SimplifiedMultiAgentEnv(BaseMultiAgentEnv):
 
         obs = self._flatten_obs(obs)
 
-        # Update simulation time
         self.termination_checker.update_simulation_time(self.bvr_config.tick_secs)
 
         # Check termination
@@ -424,3 +427,8 @@ class SimplifiedMultiAgentEnv(BaseMultiAgentEnv):
             self.tacview_logger.log_tick(self.simulator)
 
         return obs, rewards, terminateds, truncateds, infos
+
+
+# Backward-compatible import/checkpoint name.  New integrations should use
+# ``SimpleOracleEnv`` so the information advantage is explicit at the call site.
+SimplifiedMultiAgentEnv = SimpleOracleEnv

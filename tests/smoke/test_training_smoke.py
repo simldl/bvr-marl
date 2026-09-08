@@ -5,7 +5,7 @@ Verifies that:
 - The BVR environment can be created, reset, and stepped
 - A minimal subprocess training run completes without error (slow)
 
-Note: Training config tests live in bvr-marl-behavior, where the full
+Note: Training config tests live in the extension package, where the full
 YAML config suite (with reward parameters) is maintained.
 """
 

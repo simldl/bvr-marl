@@ -1,4 +1,3 @@
-import numpy as np
 from geographiclib.geodesic import Geodesic
 
 
@@ -46,7 +45,11 @@ class MapLimits:
         lat_rel = (lat - self.bottom_lat) / self.latitude_extent()
         lon_rel = (lon - self.left_lon) / self.longitude_extent()
         alt_rel = (alt - self.min_alt) / self.altitude_extent()
-        return np.clip(lat_rel, 0, 1), np.clip(lon_rel, 0, 1), np.clip(alt_rel, 0, 1)
+        return (
+            min(max(lat_rel, 0.0), 1.0),
+            min(max(lon_rel, 0.0), 1.0),
+            min(max(alt_rel, 0.0), 1.0),
+        )
 
     def absolute_position(self, lat_rel, lon_rel, alt_rel):
         lat = lat_rel * self.latitude_extent() + self.bottom_lat

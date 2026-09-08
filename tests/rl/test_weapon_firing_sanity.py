@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, Mock
 
 import numpy as np
 
+from tests.mocks.identity import declare_unit_identity
+
 
 class MockPosition:
     def __init__(self):
@@ -46,6 +48,8 @@ def setup_mock_unit_and_simulator():
     unit.max_speed_mps = 400.0
     unit.missile_types = ["test_missile_class"]
     unit.remaining_missiles = 4
+    # Real identity, not fabricated: the action processor walks unit.missiles.
+    declare_unit_identity(unit)
 
     # Mock position
     unit.position = MockPosition()
@@ -102,7 +106,7 @@ def test_gun_fires_independently():
     from bvr_marl_core.rl.environment.spaces.action_space import ActionProcessor
 
     simulator, unit = setup_mock_unit_and_simulator()
-    processor = ActionProcessor(simulator)
+    processor = ActionProcessor(simulator, information_mode="oracle")
 
     # Add unit to simulator
     simulator.active_units[1] = unit
@@ -125,7 +129,7 @@ def test_gun_fires_independently():
     unit.weapons.fire_gun.return_value = ["projectile1", "projectile2"]
 
     # Action: no missile fire (0.0), gun fire (1.0)
-    action = np.array([0.5, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+    action = np.array([0.5, 0.0, 0.0, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0])
 
     # Apply action
     processor.apply(1, action)
@@ -149,7 +153,7 @@ def test_missile_requires_all_conditions():
     from bvr_marl_core.rl.environment.spaces.action_space import ActionProcessor
 
     simulator, unit = setup_mock_unit_and_simulator()
-    processor = ActionProcessor(simulator)
+    processor = ActionProcessor(simulator, information_mode="oracle")
 
     # Add unit to simulator
     simulator.active_units[1] = unit
@@ -178,7 +182,7 @@ def test_missile_requires_all_conditions():
     unit.weapons.is_target_in_fov.return_value = True
     unit.remaining_missiles = 4
 
-    action = np.array([0.5, 0.0, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    action = np.array([0.5, 0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
     processor.apply(1, action)
 
     signals = processor.get_training_signals(1)
@@ -226,7 +230,7 @@ def test_cooldown_prevents_repeated_shots():
     from bvr_marl_core.rl.environment.spaces.action_space import ActionProcessor
 
     simulator, unit = setup_mock_unit_and_simulator()
-    processor = ActionProcessor(simulator)
+    processor = ActionProcessor(simulator, information_mode="oracle")
 
     # Add unit to simulator
     simulator.active_units[1] = unit
@@ -255,7 +259,7 @@ def test_cooldown_prevents_repeated_shots():
     unit.weapons.fire_gun.return_value = ["projectile"]
 
     # Action with both missile and gun fire
-    action = np.array([0.5, 0.0, 0.0, 0.5, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+    action = np.array([0.5, 0.0, 0.0, 1.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0])
 
     # First shot - should work
     processor.apply(1, action)
@@ -303,7 +307,7 @@ def test_envelope_scalars_exposure():
     from bvr_marl_core.rl.environment.spaces.action_space import ActionProcessor
 
     simulator, unit = setup_mock_unit_and_simulator()
-    processor = ActionProcessor(simulator)
+    processor = ActionProcessor(simulator, information_mode="oracle")
 
     # Add unit to simulator
     simulator.active_units[1] = unit

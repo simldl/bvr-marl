@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from .migration import migrate_config
+from bvr_marl_core.schema.migration import migrate_config
 
 
 def validate_config(raw: dict, model_class) -> BaseModel:

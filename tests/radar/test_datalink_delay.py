@@ -26,7 +26,8 @@ def test_get_delayed_detections_returns_aged_snapshot():
     r.cached_detections = ["t3"]
     assert r.get_delayed_detections(0.0) == ["t3"]  # no delay -> live
     assert r.get_delayed_detections(2.0) == ["t1"]  # latest 3.0 - 2.0 = 1.0
-    assert r.get_delayed_detections(10.0) == ["t0"]  # beyond history -> oldest retained
+    assert r.get_delayed_detections(10.0) == []
+    assert r.last_datalink_status == "rejected_before_history"
 
 
 def test_get_delayed_detections_no_history_returns_current():

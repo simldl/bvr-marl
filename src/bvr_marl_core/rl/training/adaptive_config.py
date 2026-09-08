@@ -5,15 +5,15 @@ Automatically adjusts training parameters based on system resources
 and handles training failures by scaling down configuration.
 """
 
-import os
 import platform
-import subprocess
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import psutil
 import torch
 import yaml
+
+from bvr_marl_core.rl.environment.spaces.action_space import FULL_ACTION_DIM
 
 
 class SystemResourceChecker:
@@ -357,7 +357,7 @@ class AdaptiveTrainingConfig:
             "model_config": {
                 "action_dim": 4,
                 "wrapped_action_dim": 4,
-                "full_action_dim": 10,
+                "full_action_dim": FULL_ACTION_DIM,
                 "active_indices": [0, 1, 2, 3],
                 "hidden_dim": 128,
                 "num_hidden_layers": 2,

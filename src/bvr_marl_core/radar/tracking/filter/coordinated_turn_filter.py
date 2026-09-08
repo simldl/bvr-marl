@@ -1,226 +1,144 @@
-import math
+"""Cartesian coordinated-turn extended Kalman filter."""
+
+from __future__ import annotations
 
 import numpy as np
 
 from bvr_marl_core.radar.tracking.filter.base_filter import BaseKFFilter
+from bvr_marl_core.radar.tracking.filter.constant_velocity_filter import _inv3_symmetric
 
 
 class CoordinatedTurnKFFilter(BaseKFFilter):
-    """
-    Coordinated-Turn Extended Kalman Filter (optional for IMM).
+    """Seven-state horizontal coordinated-turn EKF.
 
-    Internal state: [x, y, z, V, yaw_deg, pitch_deg, yaw_rate_deg, pitch_rate_deg]
-    Public state: [x, y, z, vx, vy, vz]
+    Internal state is ``[x, y, z, vx, vy, vz, omega]`` in SI units, with
+    ``omega`` in rad/s. The public state/covariance contract is the leading
+    Cartesian six-state block, exactly matching the production CV filter.
     """
 
     def __init__(
         self,
-        initial_state: np.ndarray,  # (8,)
-        initial_covariance: np.ndarray,  # (8,8)
-        process_noise_cov: np.ndarray,  # (8,8)
-        measurement_noise_cov: np.ndarray,  # (3,3)
+        initial_state: np.ndarray,
+        initial_covariance: np.ndarray,
+        process_noise_cov: np.ndarray,
+        measurement_noise_cov: np.ndarray,
         dt: float,
-        eps: float = 1e-4,
+        eps: float = 1e-8,
     ):
-        self.x = initial_state.copy()
-        self.P = initial_covariance.copy()
-        self.Q = process_noise_cov.copy()
-        self.R = measurement_noise_cov.copy()
-        self.dt = float(dt)
-        self.eps = float(eps)
-
-    def _state_transition(self, x, dt):
-        """Nonlinear state transition function."""
-        x_pos, y_pos, z_pos, V, yaw_deg, pit_deg, yaw_rate_deg, pit_rate_deg = x
-        yaw = math.radians(yaw_deg)
-        pit = math.radians(pit_deg)
-        yaw_r = math.radians(yaw_rate_deg)
-        pit_r = math.radians(pit_rate_deg)
-
-        # Handle small turn rates
-        if abs(yaw_r) < self.eps:
-            dx = V * dt * math.cos(yaw) * math.cos(pit)
-            dy = V * dt * math.sin(yaw) * math.cos(pit)
-        else:
-            dx = (V / yaw_r) * (math.sin(yaw + yaw_r * dt) - math.sin(yaw)) * math.cos(pit)
-            dy = (V / yaw_r) * (-math.cos(yaw + yaw_r * dt) + math.cos(yaw)) * math.cos(pit)
-
-        if abs(pit_r) < self.eps:
-            dz = V * dt * math.sin(pit)
-        else:
-            dz = (V / pit_r) * (math.sin(pit + pit_r * dt) - math.sin(pit))
-
-        out = np.zeros_like(x)
-        out[0:3] = [x_pos + dx, y_pos + dy, z_pos + dz]
-        out[3] = V
-        out[4] = yaw_deg + yaw_rate_deg * dt
-        out[5] = pit_deg + pit_rate_deg * dt
-        out[6] = yaw_rate_deg
-        out[7] = pit_rate_deg
-        return out
-
-    def _numerical_jacobian(self, f, x, dt, h=1e-5):
-        """Compute numerical Jacobian of function f at x."""
-        n = len(x)
-        J = np.zeros((n, n))
-        fx = f(x, dt)
-        for j in range(n):
-            xh = x.copy()
-            xh[j] += h
-            J[:, j] = (f(xh, dt) - fx) / h
-        return J
-
-    def predict(self, dt: float):
-        """Predict step using EKF.
-
-        Correct EKF order:
-          1. Save prior state x_{k-1|k-1}.
-          2. Compute Jacobian F at the PRIOR (not the predicted state).
-          3. Propagate covariance:  P = F P F^T + Q.
-          4. Advance mean:          x = f(x_{k-1|k-1}).
-        Evaluating F after mutating self.x would linearise around the wrong point.
-        """
+        self.x = np.asarray(initial_state, dtype=float).reshape(7).copy()
+        self.P = np.asarray(initial_covariance, dtype=float).reshape(7, 7).copy()
+        self.Q = np.asarray(process_noise_cov, dtype=float).reshape(7, 7).copy()
+        self.R = np.asarray(measurement_noise_cov, dtype=float).reshape(3, 3).copy()
         self.dt = float(max(1e-6, dt))
-        x_prev = self.x.copy()  # step 1: save prior
-        F = self._numerical_jacobian(
-            self._state_transition, x_prev, self.dt
-        )  # step 2: Jacobian at prior
-        self.P = F @ self.P @ F.T + self.Q  # step 3: covariance propagation
-        self.x = self._state_transition(x_prev, self.dt)  # step 4: mean prediction
+        self.eps = float(max(0.0, eps))
 
-    def update(self, z: np.ndarray):
-        """Update step (Joseph stabilized form)."""
-        # Measurement model: observe position only
-        H = np.zeros((3, 8))
-        H[0, 0] = H[1, 1] = H[2, 2] = 1.0
+    def _turn_terms(self, omega: float, dt: float) -> tuple[float, float, float, float]:
+        angle = omega * dt
+        if abs(omega) <= self.eps:
+            # Smooth Taylor form at omega=0; unlike a straight-line branch, this
+            # retains the Jacobian sensitivity needed to estimate a nascent turn.
+            angle2 = angle * angle
+            a = dt * (1.0 - angle2 / 6.0)
+            b = 0.5 * omega * dt * dt * (1.0 - angle2 / 12.0)
+            c = 1.0 - 0.5 * angle2
+            s = angle * (1.0 - angle2 / 6.0)
+            return a, b, c, s
+        return (
+            float(np.sin(angle) / omega),
+            float((1.0 - np.cos(angle)) / omega),
+            float(np.cos(angle)),
+            float(np.sin(angle)),
+        )
 
-        y = z.reshape(3) - self.x[:3]  # Innovation
-        S = H @ self.P @ H.T + self.R  # Innovation covariance
-        S += 1e-9 * np.eye(3)  # jitter for numerical safety
-
-        try:
-            S_inv = np.linalg.inv(S)
-            K = self.P @ H.T @ S_inv  # Kalman gain (reuses S_inv)
-            self._last_nis = float(y @ S_inv @ y)  # NIS (reuses S_inv)
-        except np.linalg.LinAlgError:
-            K = np.zeros((8, 3))
-            self._last_nis = 1e6  # penalise, not silently "perfect"
-
-        # Update state and covariance (Joseph form for symmetry/PSD)
-        self.x = self.x + K @ y
-        eye = np.eye(8)
-        I_KH = eye - K @ H
-        self.P = I_KH @ self.P @ I_KH.T + K @ self.R @ K.T
-
-    def get_last_update_stats(self) -> dict:
-        """Return NIS from the most recent update step, or {} if no update has occurred."""
-        if not hasattr(self, "_last_nis"):
-            return {}
-        return {"nis": self._last_nis}
-
-    def get_state(self) -> np.ndarray:
-        """Get state in [x, y, z, vx, vy, vz] format."""
-        x_pos, y_pos, z_pos, V, yaw_deg, pit_deg, *_ = self.x
-        yaw = math.radians(yaw_deg)
-        pit = math.radians(pit_deg)
-
-        vx = V * math.cos(pit) * math.cos(yaw)
-        vy = V * math.cos(pit) * math.sin(yaw)
-        vz = V * math.sin(pit)
-
-        return np.array([x_pos, y_pos, z_pos, vx, vy, vz], dtype=float)
-
-    def get_covariance(self) -> np.ndarray:
-        """Get 6x6 position+velocity covariance in [x,y,z,vx,vy,vz] format.
-
-        The internal state is [x, y, z, V, yaw_deg, pit_deg, yaw_rate_deg, pit_rate_deg].
-        The public velocity is a nonlinear function of (V, yaw_deg, pit_deg):
-            vx = V cos(pit) cos(yaw)
-            vy = V cos(pit) sin(yaw)
-            vz = V sin(pit)
-
-        We propagate P_8x8 through the Jacobian J (6×8) of get_state() w.r.t. self.x:
-            P_6x6 = J @ P_8x8 @ J^T
-
-        This preserves cross-covariances between position and velocity and accounts for
-        speed/angle coupling — unlike the discarded isotropic approximation.
-        """
-        d = math.pi / 180.0  # degree-to-radian conversion for angle columns
-        _, _, _, V, yaw_deg, pit_deg, *_ = self.x
-        yaw = math.radians(yaw_deg)
-        pit = math.radians(pit_deg)
-        cos_yaw = math.cos(yaw)
-        sin_yaw = math.sin(yaw)
-        cos_pit = math.cos(pit)
-        sin_pit = math.sin(pit)
-
-        # J[i, j] = d(output_i) / d(internal_state_j)
-        # output: [x, y, z, vx, vy, vz]    (6 rows)
-        # state:  [x, y, z, V, yaw_deg, pit_deg, yaw_rate_deg, pit_rate_deg]  (8 cols)
-        J = np.zeros((6, 8), dtype=float)
-
-        # Position rows: direct copy
-        J[0, 0] = 1.0  # dx/dx
-        J[1, 1] = 1.0  # dy/dy
-        J[2, 2] = 1.0  # dz/dz
-
-        # vx = V cos(pit) cos(yaw)
-        J[3, 3] = cos_pit * cos_yaw  # dvx/dV
-        J[3, 4] = -V * cos_pit * sin_yaw * d  # dvx/d(yaw_deg)
-        J[3, 5] = -V * sin_pit * cos_yaw * d  # dvx/d(pit_deg)
-
-        # vy = V cos(pit) sin(yaw)
-        J[4, 3] = cos_pit * sin_yaw  # dvy/dV
-        J[4, 4] = V * cos_pit * cos_yaw * d  # dvy/d(yaw_deg)
-        J[4, 5] = -V * sin_pit * sin_yaw * d  # dvy/d(pit_deg)
-
-        # vz = V sin(pit)
-        J[5, 3] = sin_pit  # dvz/dV
-        J[5, 4] = 0.0  # dvz/d(yaw_deg)  = 0
-        J[5, 5] = V * cos_pit * d  # dvz/d(pit_deg)
-
-        P6 = J @ self.P @ J.T
-        # Enforce symmetry (numerical noise from J @ P @ J^T)
-        return 0.5 * (P6 + P6.T)
-
-    def get_velocity(self) -> np.ndarray:
-        """Get velocity estimate."""
-        _, _, _, V, yaw_deg, pit_deg, *_ = self.x
-        yaw = math.radians(yaw_deg)
-        pit = math.radians(pit_deg)
+    def _state_transition(self, state: np.ndarray, dt: float) -> np.ndarray:
+        x, y, z, vx, vy, vz, omega = state
+        a, b, cosine, sine = self._turn_terms(float(omega), float(dt))
         return np.array(
             [
-                V * math.cos(pit) * math.cos(yaw),
-                V * math.cos(pit) * math.sin(yaw),
-                V * math.sin(pit),
+                x + a * vx - b * vy,
+                y + b * vx + a * vy,
+                z + dt * vz,
+                cosine * vx - sine * vy,
+                sine * vx + cosine * vy,
+                vz,
+                omega,
             ],
             dtype=float,
         )
 
-    def set_state(self, x: np.ndarray, P: np.ndarray | None = None):
-        """Set state and optionally covariance."""
-        if x.shape == (6,):
-            # Convert from [x, y, z, vx, vy, vz] to internal state
-            self.x[:3] = x[:3]
-            V = float(np.linalg.norm(x[3:6]))
-            if V > 1e-6:
-                yaw = math.degrees(math.atan2(x[4], x[3]))
-                pit = math.degrees(math.asin(np.clip(x[5] / V, -1.0, 1.0)))
-            else:
-                yaw = pit = 0.0
-            self.x[3:6] = [V, yaw, pit]
-        else:
-            self.x = x.copy()
+    def _numerical_jacobian(self, state: np.ndarray, dt: float) -> np.ndarray:
+        baseline = self._state_transition(state, dt)
+        jacobian = np.empty((7, 7), dtype=float)
+        for column in range(7):
+            step = 1e-5 * max(1.0, abs(float(state[column])))
+            perturbed = state.copy()
+            perturbed[column] += step
+            jacobian[:, column] = (self._state_transition(perturbed, dt) - baseline) / step
+        return jacobian
 
+    def predict(self, dt: float):
+        self.dt = float(max(1e-6, dt))
+        prior = self.x.copy()
+        transition = self._numerical_jacobian(prior, self.dt)
+        self.x = self._state_transition(prior, self.dt)
+        self.P = transition @ self.P @ transition.T + self.Q
+        self.P = 0.5 * (self.P + self.P.T)
+
+    def update(self, z: np.ndarray):
+        innovation = np.asarray(z, dtype=float).reshape(3) - self.x[:3]
+        innovation_covariance = self.P[:3, :3] + self.R
+        innovation_covariance = innovation_covariance.copy()
+        innovation_covariance.flat[::4] += 1e-9
+        inverse = _inv3_symmetric(innovation_covariance)
+        if inverse is None:
+            gain = np.zeros((7, 3), dtype=float)
+            self._last_nis = 1e6
+        else:
+            gain = self.P[:, :3] @ inverse
+            self._last_nis = float(innovation @ inverse @ innovation)
+        self.x += gain @ innovation
+        a = self.P - gain @ self.P[:3, :]
+        a -= a[:, :3] @ gain.T
+        self.P = a + gain @ self.R @ gain.T
+        self.P = 0.5 * (self.P + self.P.T)
+
+    def get_state(self) -> np.ndarray:
+        return self.x[:6].copy()
+
+    def get_covariance(self) -> np.ndarray:
+        return self.P[:6, :6].copy()
+
+    def get_velocity(self) -> np.ndarray:
+        return self.x[3:6].copy()
+
+    def set_state(self, x: np.ndarray, P: np.ndarray | None = None):
+        value = np.asarray(x, dtype=float)
+        if value.shape == (6,):
+            self.x[:6] = value
+        elif value.shape == (7,):
+            self.x = value.copy()
+        else:
+            raise ValueError(f"CT state must be length 6 or 7, received {value.shape}.")
         if P is not None:
-            if P.shape == (6, 6):
-                # Convert 6x6 covariance to 8x8 for internal use
-                P_new = np.eye(8) * 100.0  # Default for unmapped dimensions
-                P_new[:3, :3] = P[:3, :3]  # Position covariance
-                # Approximate velocity covariance mapping
-                P_new[3, 3] = np.trace(P[3:, 3:]) / 3.0  # Speed variance
-                P_new[4:6, 4:6] = np.eye(2) * 50.0  # Angle variances
-                P_new[6:8, 6:8] = np.eye(2) * 10.0  # Rate variances
-                self.P = P_new
+            covariance = np.asarray(P, dtype=float)
+            if covariance.shape == (6, 6):
+                self.P[:6, :6] = covariance
+                self.P[6, :6] = 0.0
+                self.P[:6, 6] = 0.0
+            elif covariance.shape == (7, 7):
+                self.P = covariance.copy()
             else:
-                self.P = P.copy()
+                raise ValueError(f"CT covariance must be 6x6 or 7x7, received {covariance.shape}.")
+
+    def set_measurement_covariance(self, covariance: np.ndarray):
+        value = np.asarray(covariance, dtype=float)
+        if value.shape != (3, 3):
+            raise ValueError(f"Measurement covariance must be 3x3, received {value.shape}.")
+        value = 0.5 * (value + value.T)
+        if not np.all(np.isfinite(value)) or np.linalg.eigvalsh(value).min() < -1e-9:
+            raise ValueError("Measurement covariance must be finite and positive semidefinite.")
+        self.R = value.copy()
+
+    def set_measurement_std(self, std_xyz: tuple[float, float, float]):
+        values = np.asarray(std_xyz, dtype=float)
+        self.R = np.diag(values * values)

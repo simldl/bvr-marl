@@ -3,7 +3,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from .unibw_style import RUN_COLOR_ORDER, set_unibw_style
+from bvr_marl_core.analysis.plotting.unibw_style import RUN_COLOR_ORDER, set_unibw_style
 
 TAG_LABELS: dict[str, dict[str, str]] = {
     "rollout/ep_rew_mean": {
@@ -92,9 +92,14 @@ TAG_LABELS: dict[str, dict[str, str]] = {
         "ylabel": "Mean kills per episode",
         "xlabel": "Training step",
     },
-    "tactical/valid_shot_rate": {
-        "title": "Valid Shot Rate",
-        "ylabel": "Valid / attempted shots",
+    "tactical/shot_conversion_rate": {
+        "title": "Shot Conversion Rate",
+        "ylabel": "Launches / shot opportunities",
+        "xlabel": "Training step",
+    },
+    "tactical/shot_opportunities": {
+        "title": "Shot Opportunities",
+        "ylabel": "Viable firing solutions per episode",
         "xlabel": "Training step",
     },
     "tactical/invalid_shot_rate": {
@@ -358,13 +363,13 @@ def has_known_label(tag: str) -> bool:
     return tag in TAG_LABELS or normalize_tag(tag) in TAG_LABELS
 
 
-def _smooth(values: pd.Series, smoothing: float) -> pd.Series:
+def smooth_series(values: pd.Series, smoothing: float) -> pd.Series:
     if smoothing <= 0:
         return values
     return values.ewm(alpha=1.0 - smoothing, adjust=False).mean()
 
 
-def _run_color_map(runs: list[str]) -> dict[str, str]:
+def run_color_map(runs: list[str]) -> dict[str, str]:
     """Assign colors deterministically by sorting run names."""
     return {run: RUN_COLOR_ORDER[i % len(RUN_COLOR_ORDER)] for i, run in enumerate(sorted(runs))}
 
@@ -398,7 +403,7 @@ def plot_metric(
     ylabel = ylabel or labels.get("ylabel", tag)
 
     runs = metric_df["run"].unique().tolist()
-    color_map = _run_color_map(runs)
+    color_map = run_color_map(runs)
 
     fig, ax = plt.subplots()
 
@@ -417,7 +422,7 @@ def plot_metric(
 
         ax.plot(
             run_df["step"],
-            _smooth(run_df["value"], smoothing),
+            smooth_series(run_df["value"], smoothing),
             color=color,
             label=run,
         )

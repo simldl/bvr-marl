@@ -1,4 +1,4 @@
-"""SQI (shot quality index) vs slant range for several closure rates."""
+"""SQI (shot quality index) vs slant range for several target behaviours."""
 
 from __future__ import annotations
 
@@ -10,39 +10,54 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from paper_style import paper_figure, save_paper_figure  # noqa: E402
-from sqi_model import compute_sqi, get_amraam_params  # noqa: E402
+from sqi_model import compute_sqi, dlz_at  # noqa: E402
+
+# The zone model reads the target's velocity component along the line of sight,
+# so a "closure rate" is expressed here as what the target is doing.
+CASES = [
+    ("Head-on, 250 m/s", 250.0, 180.0),
+    ("Head-on, 400 m/s", 400.0, 180.0),
+    ("Beaming", 250.0, 90.0),
+    ("Running, 250 m/s", 250.0, 0.0),
+    ("Running, 400 m/s", 400.0, 0.0),
+]
 
 
 def create_sqi_range_closure_plot():
-    """Plot SQI vs slant range for a range of closure rates."""
-    base_range_km, _ = get_amraam_params()
-    range_km = np.linspace(0, base_range_km, 100)
-    closure_rates_mps = [-400, -200, 0, 100, 200, 400, 600]
+    """Plot SQI vs slant range for a range of target aspects and speeds."""
+    range_km = np.linspace(2.0, 170.0, 120)
 
     fig, ax = paper_figure()
-    distance_normalized = 1.0 - np.clip(range_km / base_range_km, 0, 1)
-    for closure_rate in closure_rates_mps:
-        closure_norm = np.clip(closure_rate / 400, -1, 1)
-        sqi = [compute_sqi(d, closure_norm, 0.0) for d in distance_normalized]
-        if closure_rate == 0:
-            label = "Stationary"
-        elif closure_rate < 0:
-            label = f"Diverging {abs(closure_rate)} m/s"
-        else:
-            label = f"Closure {closure_rate} m/s"
-        ax.plot(range_km, sqi, label=label, marker="o", markevery=10)
+    for label, speed, yaw in CASES:
+        sqi = [compute_sqi(r, tgt_speed_mps=speed, tgt_yaw_deg=yaw) for r in range_km]
+        ax.plot(range_km, sqi, linewidth=1.4, label=label)
 
-    ax.axhline(
-        0.55, color="red", linestyle="--", linewidth=1.2, alpha=0.8, label="Threshold (0.55)"
-    )
-    ax.fill_between(range_km, 0.55, 1.0, alpha=0.1, color="green")
-    ax.fill_between(range_km, 0, 0.55, alpha=0.1, color="red")
+    # Mark the zone edges for the head-on reference case the book quotes.
+    ref = dlz_at(tgt_speed_mps=250.0, tgt_yaw_deg=180.0)
+    for value, name in (
+        (ref.r_nez_out_m / 1000.0, "$R_{NEZ}$"),
+        (ref.r_pi_m / 1000.0, "$R_{PI}$"),
+        (ref.r_aero_m / 1000.0, "$R_{Aero}$"),
+    ):
+        ax.axvline(value, color="0.55", linestyle=":", linewidth=0.9)
+        ax.text(
+            value - 1.5,
+            0.60,
+            name,
+            ha="right",
+            va="bottom",
+            fontsize=7,
+            color="0.35",
+            rotation=90,
+        )
+
     ax.set_xlabel("Slant range [km]")
-    ax.set_ylabel("SQI [0-1]")
-    ax.set_xlim(0, base_range_km)
+    ax.set_ylabel("Shot quality index")
+    ax.set_title("SQI vs range (shooter 10 km, 300 m/s)")
+    ax.set_xlim(0, 170)
     ax.set_ylim(0, 1.0)
-    ax.legend(loc="best", ncol=2)
     ax.grid(True, linestyle=":")
+    ax.legend(loc="upper right", fontsize=7)
     return fig
 
 

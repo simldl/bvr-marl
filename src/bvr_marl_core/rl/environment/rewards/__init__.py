@@ -6,6 +6,7 @@ For the full modular reward suite (tactical, energy, control, defensive)
 use an extension package's ``rl.environment.rewards``.
 """
 
-from .calculator import RewardCalculator
+from bvr_marl_core.rl.environment.rewards.calculator import RewardCalculator
+from bvr_marl_core.rl.environment.rewards.information import RewardInformationClass
 
-__all__ = ["RewardCalculator"]
+__all__ = ["RewardCalculator", "RewardInformationClass"]

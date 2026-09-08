@@ -8,11 +8,11 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from paper_style import paper_figure, save_paper_figure  # noqa: E402
+from paper_style import paper_figure, save_paper_figure
 
-from bvr_marl_core.aircraft.types.eurofighter import Eurofighter  # noqa: E402
-from bvr_marl_core.radar.core.lut import DetectionLUT  # noqa: E402
-from bvr_marl_core.simulator.core.helpers import Position  # noqa: E402
+from bvr_marl_core.aircraft.types.eurofighter import Eurofighter
+from bvr_marl_core.radar.core.lut import DetectionLUT
+from bvr_marl_core.simulator.core.helpers import Position
 
 _MAP_LIMITS = {"north": 100000, "south": -100000, "east": 100000, "west": -100000}
 
@@ -34,15 +34,19 @@ def plot_detection_probability_heatmap():
         freq_hz=cfg.get("radar_frequency_hz", 10e9),
         tx_power_w=cfg.get("radar_tx_power_w", 18e3),
         gain=10 ** (cfg.get("radar_antenna_gain_db", 36.0) / 10),
-        max_range_m=100_000.0,
+        max_range_m=200_000.0,
         snr_threshold_db=cfg.get("radar_snr_threshold_db", 9.0),
+        # Coherent-integration (processing) gain — the same value the real
+        # aircraft radar uses. Without it the LUT reproduces the pre-refactor
+        # (gainless) detection and a fighter cannot see a fighter at range.
+        processing_gain_db=cfg.get("radar_processing_gain_db", 30.0),
         max_rcs=3.5,
         rcs_bins=256,
         dist_bins=256,
     )
 
     eurofighter_rcs_nominal = 3.0
-    distances_km = np.linspace(0, 100, 256)
+    distances_km = np.linspace(0, 200, 256)
     distances_m = distances_km * 1000
     rcs_values = np.linspace(0, 3.5, 256)
     dist_mesh, rcs_mesh = np.meshgrid(distances_m, rcs_values, indexing="ij")

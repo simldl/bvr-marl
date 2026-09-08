@@ -9,20 +9,29 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from paper_style import paper_figure, save_paper_figure  # noqa: E402
-from sqi_model import compute_sqi, get_amraam_params  # noqa: E402
+from paper_style import paper_figure, save_paper_figure
+from sqi_model import compute_sqi
 
 
 def create_sqi_heatmap():
-    """Plot an SQI heatmap as a function of range and closure rate."""
-    base_range_km, _ = get_amraam_params()
-    range_vals = np.linspace(0, base_range_km, 80)
-    closure_vals = np.linspace(-200, 600, 80)
-    grid_x, grid_y = np.meshgrid(range_vals, closure_vals)
+    """SQI over slant range and the target's line-of-sight velocity.
 
-    distance_norm = 1.0 - np.clip(grid_x / base_range_km, 0, 1)
-    closure_norm = np.clip(grid_y / 400, -1, 1)
-    sqi = compute_sqi(distance_norm, closure_norm, 0.0)
+    The vertical axis is the TARGET's velocity component along the line of
+    sight -- positive when it is running -- because that, not the total closing
+    speed, is what the zone model reads.
+    """
+    range_vals = np.linspace(2.0, 170.0, 90)
+    escape_vals = np.linspace(-400.0, 400.0, 90)
+
+    sqi = np.empty((escape_vals.size, range_vals.size))
+    for i, escape in enumerate(escape_vals):
+        # A target running at |escape| heads away (yaw 0); closing heads in (180).
+        yaw = 0.0 if escape >= 0 else 180.0
+        speed = abs(float(escape))
+        for j, rng in enumerate(range_vals):
+            sqi[i, j] = compute_sqi(float(rng), tgt_speed_mps=speed, tgt_yaw_deg=yaw)
+
+    grid_x, grid_y = np.meshgrid(range_vals, escape_vals)
 
     fig, ax = paper_figure(row_height_in=2.8)
     im = ax.contourf(grid_x, grid_y, sqi, levels=20, cmap="RdYlGn")
@@ -30,7 +39,7 @@ def create_sqi_heatmap():
         grid_x,
         grid_y,
         sqi,
-        levels=[0.3, 0.55, 0.7, 0.9],
+        levels=[0.3, 0.45, 0.6, 0.8],
         colors="black",
         alpha=0.4,
         linewidths=0.8,
@@ -40,19 +49,12 @@ def create_sqi_heatmap():
     cbar.set_label("SQI value", fontsize=8)
     cbar.ax.tick_params(labelsize=8)
 
-    ax.axhline(400, color="white", linestyle=":", alpha=0.8, linewidth=1.2)
-    ax.text(
-        base_range_km * 0.05,
-        415,
-        "Optimal closure",
-        fontsize=8,
-        color="white",
-        bbox=dict(boxstyle="round", facecolor="black", alpha=0.5),
-    )
+    ax.axhline(0.0, color="white", linestyle=":", alpha=0.8, linewidth=1.2)
     ax.set_xlabel("Slant range [km]")
-    ax.set_ylabel("Closure rate [m/s]")
-    ax.set_xlim(0, base_range_km)
-    ax.set_ylim(-200, 600)
+    ax.set_ylabel("Target LOS velocity [m/s]   (+ = running)")
+    ax.set_title("SQI (shooter 10 km, 300 m/s, co-altitude)")
+    ax.set_xlim(range_vals[0], range_vals[-1])
+    ax.set_ylim(-400, 400)
     return fig
 
 

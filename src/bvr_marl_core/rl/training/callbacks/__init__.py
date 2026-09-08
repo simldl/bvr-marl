@@ -1,9 +1,9 @@
 """Callbacks for training monitoring and metrics logging."""
 
-from .checkpoint import SmartCheckpointCallback
-from .metrics import EpisodeMetricsCallback
-from .progress import ProgressCallback
-from .weight_loading import WeightLoadingCallback
+from bvr_marl_core.rl.training.callbacks.checkpoint import SmartCheckpointCallback
+from bvr_marl_core.rl.training.callbacks.metrics import EpisodeMetricsCallback
+from bvr_marl_core.rl.training.callbacks.progress import ProgressCallback
+from bvr_marl_core.rl.training.callbacks.weight_loading import WeightLoadingCallback
 
 __all__ = [
     "EpisodeMetricsCallback",

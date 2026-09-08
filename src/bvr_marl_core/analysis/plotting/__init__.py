@@ -1,13 +1,17 @@
 """UniBw-style TensorBoard plotting utilities."""
 
-from .plot_tensorboard_metric import TAG_LABELS, plot_metric
-from .plot_training_dashboard import (
+from bvr_marl_core.analysis.plotting.plot_tensorboard_metric import TAG_LABELS, plot_metric
+from bvr_marl_core.analysis.plotting.plot_training_dashboard import (
     TACTICAL_DASHBOARD_TAGS,
     plot_tactical_dashboard,
     plot_training_dashboard,
 )
-from .tensorboard_loader import load_tensorboard_scalars
-from .unibw_style import RUN_COLOR_ORDER, UNIBW_COLORS, set_unibw_style
+from bvr_marl_core.analysis.plotting.tensorboard_loader import load_tensorboard_scalars
+from bvr_marl_core.analysis.plotting.unibw_style import (
+    RUN_COLOR_ORDER,
+    UNIBW_COLORS,
+    set_unibw_style,
+)
 
 __all__ = [
     "UNIBW_COLORS",

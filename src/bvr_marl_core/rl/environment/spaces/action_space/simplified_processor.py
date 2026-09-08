@@ -16,11 +16,8 @@ import math
 
 import numpy as np
 
-from bvr_marl_core.rl.environment.spaces.action_space.automation.weapon_cooldowns import (
-    WeaponCooldowns,
-)
+from bvr_marl_core.aircraft.systems.fire_veto import VETO_CATEGORY_FOV, wasted_category_key
 from bvr_marl_core.rl.environment.spaces.action_space.base_processor import ActionProcessorBase
-from bvr_marl_core.rl.environment.spaces.action_space.utils.target_sorting import TargetSorter
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +50,9 @@ class SimplifiedActionProcessor(ActionProcessorBase):
         self._init_agent_state(agent_id, unit)
         state = self.agent_states[agent_id]
 
-        self.missile_auto.cleanup_destroyed_targets(set(self.simulator.active_units.keys()))
+        self.missile_auto.sync_missiles_in_flight(
+            self.missile_auto.weapons_in_flight(unit, getattr(self.simulator, "active_units", {}))
+        )
         self.debug_collector.reset_step_counters(state)
 
         dt = float(getattr(self.simulator, "tick_secs", 1.0))
@@ -110,10 +109,10 @@ class SimplifiedActionProcessor(ActionProcessorBase):
         alpha_v = self._get_alpha_dt_aware(dt, self.tau_v)
         alpha_ang = self._get_alpha_dt_aware(dt, self.lift_vector_proc.tau_ang)
 
-        # u_bar is kept at 10 dims for base-class compatibility; only first 3 matter here
-        alphas = np.array([alpha_v, alpha_ang, alpha_ang] + [0.0] * 7)
+        # u_bar is kept at 9 dims for base-class compatibility; only first 3 matter here
+        alphas = np.array([alpha_v, alpha_ang, alpha_ang] + [0.0] * 6)
         state["u_bar"] = (1 - alphas) * state["u_bar"] + alphas * np.concatenate(
-            [u_hat[:3], np.zeros(7)]
+            [u_hat[:3], np.zeros(6)]
         )
         state["v_bar"] = (1 - alpha_v) * state["v_bar"] + alpha_v * unit.speed
 
@@ -238,29 +237,42 @@ class SimplifiedActionProcessor(ActionProcessorBase):
             return
 
         if selected_target is None:
+            # Trigger pulled with no target selected: the selection action addressed an
+            # empty contact slot. This IS a policy error and gets its own counter so the
+            # reward can penalize it (see debug_info.init_training_signals).
             state["vetoed_missile_attempts_this_step"] = 1
+            state["vetoed_missile_no_target_this_step"] = 1
             logger.debug(f"Aircraft {aircraft_id}: FIRE_VETO no_target")
             return
 
         if not self._is_in_fov(unit, selected_target):
+            # Trigger pulled with the target outside FOV -> wasted (policy error).
             state["vetoed_missile_attempts_this_step"] = 1
+            state["vetoed_missile_wasted_this_step"] = 1
+            state[wasted_category_key(VETO_CATEGORY_FOV)] = 1
             logger.debug(f"Aircraft {aircraft_id}: FIRE_VETO target_outside_fov")
             return
 
         if not self.weapon_cooldowns.is_missile_ready(state):
+            # Weapon on cooldown: firing not permissible -> suppressed.
             state["vetoed_missile_attempts_this_step"] = 1
+            state["vetoed_missile_suppressed_this_step"] = 1
             logger.debug(f"Aircraft {aircraft_id}: FIRE_VETO cooldown")
             return
 
         target_id = getattr(selected_target, "id", None)
         if self.weapon_cooldowns.is_target_saturated(self.simulator, unit.group, target_id):
+            # Per-target saturation cap reached: firing not permissible -> suppressed.
             state["vetoed_missile_attempts_this_step"] = 1
+            state["vetoed_missile_suppressed_this_step"] = 1
             logger.debug(f"Aircraft {aircraft_id}: FIRE_VETO target_saturated")
             return
 
         has_missiles = bool(unit.missile_types)
         if not has_missiles:
+            # Winchester (out of missiles): firing not permissible -> suppressed.
             state["vetoed_missile_attempts_this_step"] = 1
+            state["vetoed_missile_suppressed_this_step"] = 1
             return
 
         try:
@@ -270,6 +282,7 @@ class SimplifiedActionProcessor(ActionProcessorBase):
         except Exception as exc:
             logger.warning(f"Aircraft {aircraft_id}: fire_missile_direct raised {exc}")
             state["vetoed_missile_attempts_this_step"] = 1
+            state["vetoed_missile_wasted_this_step"] = 1
             return
 
         if missile is not None:
@@ -287,5 +300,9 @@ class SimplifiedActionProcessor(ActionProcessorBase):
                 f"Aircraft {aircraft_id}: DIRECT_MISSILE_FIRED target={getattr(selected_target, 'id', 'none')}"
             )
         else:
+            # Permissible attempt rejected by the weapon model (range/lock) -> wasted.
             state["vetoed_missile_attempts_this_step"] = 1
+            state["vetoed_missile_wasted_this_step"] = 1
+            # The oracle path bypasses the lock and range gates by design, so the
+            # only gate that can be attributed here is FOV, checked above.
             logger.debug(f"Aircraft {aircraft_id}: DIRECT_FIRE_VETO {veto}")

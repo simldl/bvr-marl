@@ -1,5 +1,30 @@
+from bvr_marl_core.domain.sensing_visibility import sensible_hostiles
 from bvr_marl_core.radar.lock.aircraft import AircraftLockController
 from bvr_marl_core.radar.radar import Radar
+
+
+def radar_target_candidates(sim, parent):
+    """Hostile units this radar may attempt to detect.
+
+    Sensor-invisible units (AWACS and other pure support assets) are dropped HERE, at
+    enumeration, before any per-target work happens. That is the point of doing it here
+    rather than filtering detections or tracks later: everything downstream -- RCS
+    lookup, SNR, line-of-sight, false-alarm merging, association, track maintenance --
+    is per-candidate, so a unit removed at this line costs nothing for the rest of the
+    tick.
+
+    One definition for both radar entry points. They used to build the same list
+    independently, which is exactly how the launch gate and the feasibility gate came to
+    disagree about rules of engagement. The hostility+invisibility half of that rule now
+    lives in `domain.sensing_visibility` so the RWR and seeker paths share it.
+    """
+    parent_id = getattr(parent, "id", None)
+    parent_group = getattr(parent, "group", None)
+    return [
+        unit
+        for unit in sensible_hostiles(sim.active_units.values(), parent_group)
+        if unit.id != parent_id
+    ]
 
 
 class AircraftRadar(Radar):
@@ -7,6 +32,7 @@ class AircraftRadar(Radar):
         lock_ctrl = lock_ctrl or AircraftLockController()
         # Aircraft radars are susceptible to jamming
         kwargs.setdefault("jam_susceptible", True)
+        kwargs.setdefault("use_beam_steering", True)
         super().__init__(*args, lock_ctrl=lock_ctrl, data_link=data_link, owner=owner, **kwargs)
         self.data_link = data_link
         self.owner = owner
@@ -31,34 +57,16 @@ class AircraftRadar(Radar):
         - Still skip missiles as lock candidates.
         """
         detected_target_ids = []
-        for (
-            tid,
-            state,
-            cov,
-            tgt,
-            utype,
-            ref,
-            confidence,
-            n_obs,
-            lifetime,
-            update_count,
-            is_deception,
-            suspect_deception,
-            engagement_id,
-            jammer_id,
-            engageable,
-        ) in tracks:
-            # Skip missiles
-            if tgt is not None and getattr(tgt, "is_missile", False):
+        for track in tracks:
+            # Skip contacts classified as missiles without consulting a target object.
+            if "missile" in track.classification:
                 continue
 
             # If there's no engagement_id and track isn't engageable, skip
-            if (engagement_id is None) and (not engageable):
+            if track.emitter_hypothesis_id is None and not track.engageable:
                 continue
 
-            det_id = engagement_id if engagement_id is not None else getattr(tgt, "id", None)
-            if det_id is not None:
-                detected_target_ids.append(det_id)
+            detected_target_ids.append(track.track_id)
 
         self.lock_ctrl.update_locks(detected_target_ids)
 
@@ -78,9 +86,7 @@ class AircraftRadar(Radar):
         parent = getattr(self, "owner", None)
         if parent is None:
             return []
-        targets = [
-            u for u in sim.active_units.values() if u.id != parent.id and u.group != parent.group
-        ]
+        targets = radar_target_candidates(sim, parent)
 
         tracks = self.update(
             tick_secs,
@@ -90,4 +96,24 @@ class AircraftRadar(Radar):
             steer_h=steer_h,
             steer_p=steer_p,
         )
+        return tracks
+
+    def stage_reports_for_sensors(self, tick_secs, sim, owner_position, steer_h=0.0, steer_p=0.0):
+        parent = getattr(self, "owner", None)
+        if parent is None:
+            self.cached_detections = ()
+            return ()
+        targets = radar_target_candidates(sim, parent)
+        return self.stage_reports(
+            tick_secs,
+            sim,
+            targets,
+            owner_position,
+            steer_h,
+            steer_p,
+        )
+
+    def update_from_staged_sensor_reports(self, tick_secs, sim, owner_position):
+        tracks = self.update_from_staged_reports(tick_secs, sim, owner_position)
+        self.locked_targets = set(self.lock_ctrl.locked_target_ids())
         return tracks

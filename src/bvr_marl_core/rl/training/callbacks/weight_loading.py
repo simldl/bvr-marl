@@ -116,11 +116,20 @@ class WeightLoadingCallback(Callback):
                 "from_checkpoint_policy/to_stage_policies."
             )
 
-        if self.strict_policy_mapping and loaded <= 0:
-            raise RuntimeError(
+        if loaded <= 0:
+            target_ids = self._target_policy_ids(multi_rl_module)
+            message = (
                 "Policy weight mapping did not initialize any target policy. "
-                f"source_policies={list(module_state.keys())}"
+                f"source_policies={list(module_state.keys())} target_policies={target_ids}. "
+                "If the checkpoint's root module_state.pkl holds raw parameter names "
+                "instead of a {policy_id: state} mapping, regenerate it with the "
+                "checkpoint writer that produced it."
             )
+            if self.strict_policy_mapping:
+                raise RuntimeError(message)
+            # Never fail silently: random-weight starts must be visible in the log.
+            print(f"[WARNING] {message}")
+            print("[WARNING] Continuing with random weights for all target policies")
 
     def _load_direct_policy_matches(self, multi_rl_module, module_state: dict) -> int:
         loaded = 0

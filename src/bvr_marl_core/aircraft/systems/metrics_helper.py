@@ -10,10 +10,9 @@ Provides tactical metrics:
 - Missile inventory by class
 """
 
-from typing import Any, Optional
+from typing import Any
 
-import numpy as np
-
+from bvr_marl_core.aircraft.core.poles import estimate_launch_poles
 from bvr_marl_core.simulator.utils.geodesics import geodetic_distance_km
 
 
@@ -80,15 +79,15 @@ class MetricsHelper:
 
     def estimate_f_pole(self, target) -> dict[str, Any]:
         """
-        Estimate F-pole (range when missile goes active/pitbull).
+        Estimate F-pole (shooter-target range at missile intercept).
 
-        For Fox-3 missiles:
-        - F-pole = range when missile's seeker activates
-        - Typically 10-20km from target depending on missile type
+        A full-fidelity F-pole requires missile flyout integration. This method
+        uses the shared lightweight kinematic estimator and reports whether the
+        estimated intercept is inside missile reach.
 
         Returns:
-        - f_pole_range_m: estimated F-pole range
-        - time_to_f_pole_s: estimated time until F-pole (if missile in flight)
+        - f_pole_range_m: shooter-target range at estimated intercept
+        - time_to_f_pole_s: estimated time to intercept
         - is_estimate: bool (True - this is an approximation)
         """
         if not target:
@@ -100,49 +99,18 @@ class MetricsHelper:
             }
 
         try:
-            missile_types = getattr(self.aircraft, "missile_types", [])
-            if not missile_types:
-                return {
-                    "valid": False,
-                    "f_pole_range_m": 0.0,
-                    "time_to_f_pole_s": 0.0,
-                    "is_estimate": True,
-                }
-
-            missile_cls = missile_types[0]
-            try:
-                temp_missile = missile_cls(
-                    None, None, self.aircraft, self.aircraft.map_limits, self.aircraft.group
-                )
-                active_range = (
-                    getattr(temp_missile.radar, "max_range_m", 20000)
-                    if hasattr(temp_missile, "radar")
-                    else 20000
-                )
-                f_pole_range = min(active_range * 0.75, 20000)
-            except Exception:
-                f_pole_range = 15000
-
-            slant_range = (
-                geodetic_distance_km(
-                    self.aircraft.position.lat,
-                    self.aircraft.position.lon,
-                    self.aircraft.position.alt,
-                    target.position.lat,
-                    target.position.lon,
-                    target.position.alt,
-                )
-                * 1000.0
-            )
-
-            avg_missile_speed = 1000.0  # ~Mach 3
-            time_to_f_pole = max(0.0, (slant_range - f_pole_range) / avg_missile_speed)
+            estimate = estimate_launch_poles(self.aircraft, target)
 
             return {
-                "valid": True,
-                "f_pole_range_m": f_pole_range,
-                "time_to_f_pole_s": time_to_f_pole,
+                "valid": estimate.valid,
+                "f_pole_range_m": estimate.f_pole_range_m,
+                "time_to_f_pole_s": estimate.time_to_impact_s,
+                "slant_range_m": estimate.slant_range_m,
+                "intercept_possible": estimate.intercept_possible,
+                "missile_avg_speed_mps": estimate.missile_avg_speed_mps,
+                "missile_target_closure_mps": estimate.missile_target_closure_mps,
                 "is_estimate": True,
+                "error": estimate.reason or None,
             }
         except Exception as e:
             return {
@@ -155,17 +123,17 @@ class MetricsHelper:
 
     def estimate_a_pole(self, target) -> dict[str, Any]:
         """
-        Estimate A-pole (range when missile arrives at target).
+        Estimate A-pole (shooter-target range when missile goes active).
 
         For active missiles (Fox-3):
-        - A-pole is less relevant (can go cold after F-pole)
+        - A-pole is the pitbull / active-seeker handoff point
 
         For SARH missiles (Fox-1):
-        - A-pole = 0 (must maintain lock until impact)
+        - A-pole is not applicable; shooter must support until impact
 
         Returns:
         - a_pole_range_m: estimated A-pole range
-        - time_to_a_pole_s: estimated time until impact
+        - time_to_a_pole_s: estimated time until active handoff
         - requires_lock_at_impact: bool
         """
         if not target:
@@ -177,47 +145,18 @@ class MetricsHelper:
             }
 
         try:
-            missile_types = getattr(self.aircraft, "missile_types", [])
-            if not missile_types:
-                return {
-                    "valid": False,
-                    "a_pole_range_m": 0.0,
-                    "time_to_a_pole_s": 0.0,
-                    "requires_lock_at_impact": False,
-                }
-
-            missile_cls = missile_types[0]
-            try:
-                temp_missile = missile_cls(
-                    None, None, self.aircraft, self.aircraft.map_limits, self.aircraft.group
-                )
-                fox_type = getattr(temp_missile, "fox_type", 3)
-                requires_lock = fox_type == 1  # Fox-1 (SARH) requires continuous lock until impact
-            except Exception:
-                fox_type = 3
-                requires_lock = False
-
-            slant_range = (
-                geodetic_distance_km(
-                    self.aircraft.position.lat,
-                    self.aircraft.position.lon,
-                    self.aircraft.position.alt,
-                    target.position.lat,
-                    target.position.lon,
-                    target.position.alt,
-                )
-                * 1000.0
-            )
-
-            avg_missile_speed = 1000.0  # ~Mach 3
-            time_to_impact = slant_range / avg_missile_speed
+            estimate = estimate_launch_poles(self.aircraft, target)
 
             return {
-                "valid": True,
-                "a_pole_range_m": 0.0,
-                "time_to_a_pole_s": time_to_impact,
-                "requires_lock_at_impact": requires_lock,
-                "fox_type": fox_type,
+                "valid": estimate.valid,
+                "a_pole_range_m": estimate.a_pole_range_m,
+                "time_to_a_pole_s": estimate.time_to_active_s,
+                "active_range_m": estimate.active_range_m,
+                "active_supported": estimate.active_supported,
+                "requires_lock_at_impact": estimate.requires_lock_until_impact,
+                "fox_type": estimate.fox_type,
+                "is_estimate": True,
+                "error": estimate.reason or None,
             }
         except Exception as e:
             return {

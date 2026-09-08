@@ -45,6 +45,8 @@ def test_generate_one_detection(obsgen):
     dets = obsgen.generate(own_pos.position, [target], yaw_deg=0.0, pitch_deg=0.0)
     assert len(dets) == 1
     assert "az" in dets[0] and "el" in dets[0]
+    assert "T" not in dets[0]
+    assert obsgen.last_detection_targets == (target,)
 
 
 def _notch_obsgen():
@@ -169,43 +171,6 @@ def test_notch_factor_ramps_with_range_rate():
     assert factor_for(25.0) == pytest.approx((25.0 / 50.0) ** 2)
     assert factor_for(50.0) == pytest.approx(1.0)
     assert factor_for(500.0) == pytest.approx(1.0)
-
-
-def test_ecm_jamming_system():
-    """Test ECM/jamming system that replaced false alarms."""
-    # Test the new ECM/jamming system that replaced false alarms
-    try:
-        from bvr_marl_core.radar.ew.ecm_emitter import ECMEmitter
-
-        # Create mock owner (aircraft)
-        class MockOwner:
-            def __init__(self):
-                self.id = 123
-                self.position = Position(lat=0.0, lon=0.0, alt=1000.0)
-
-        mock_owner = MockOwner()
-
-        # Create ECM emitter with correct parameters
-        ecm = ECMEmitter(
-            owner=mock_owner,
-            erp_w=1000.0,  # Effective radiated power
-            bw_hz=10e6,  # Bandwidth in Hz
-            hop_period_s=0.1,
-            techniques={"drfm_multi_false"},
-        )
-
-        # Verify ECM emitter can be created and has expected attributes
-        assert ecm is not None
-        assert hasattr(ecm, "owner")
-        assert hasattr(ecm, "erp_w")
-        assert hasattr(ecm, "bw_hz")
-        assert ecm.owner == mock_owner
-        assert ecm.erp_w == 1000.0
-        assert ecm.bw_hz == 10e6
-        assert "drfm_multi_false" in ecm.techniques
-
-    except ImportError:
-        pytest.skip("ECM/jamming system not available for testing")
 
 
 @pytest.fixture

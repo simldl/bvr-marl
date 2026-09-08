@@ -17,6 +17,8 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 
+from tests.helpers.track_snapshot import track_snapshot
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -199,38 +201,18 @@ class TestTargetProviderTid:
     def _make_track(
         self, tid, unit_id, state=None, conf=0.9, n_obs=5, upd_cnt=10, is_deception=False
     ):
-        """Build a 15-element track tuple matching the new format."""
+        """Build an authoritative track snapshot."""
         if state is None:
             state = np.array([1000.0, 2000.0, 0.0, 100.0, 50.0, 0.0])
-        tgt = Mock()
-        tgt.id = unit_id
-        tgt.is_missile = False
-        tgt.is_countermeasure = False
-        tgt.is_non_engageable = False
-        ref = Mock()
-        ref.lat = 0.0
-        ref.lon = 0.0
-        ref.alt = 10000.0
         cov = np.eye(6) * 100.0
-        # 15-value format:
-        # tid, state, cov, tgt, utype, ref, conf, n_obs, lifetime, upd_cnt,
-        # is_deception, suspect_deception, engagement_id, jammer_id, engageable
-        return (
+        return track_snapshot(
             tid,
-            state,
-            cov,
-            tgt,
-            "aircraft",
-            ref,
-            conf,
-            n_obs,
-            20,
-            upd_cnt,
-            is_deception,
-            False,
-            None,
-            None,
-            True,
+            state=state,
+            covariance=cov,
+            confidence=conf,
+            lifetime_s=20.0,
+            suspect_deception=is_deception,
+            reference=(0.0, 0.0, 10_000.0),
         )
 
     def _make_missile_stub(self, designated_id, tracks):
@@ -257,7 +239,7 @@ class TestTargetProviderTid:
         unit_id = "target-001"
         track_tid = 42
         tracks = [self._make_track(track_tid, unit_id)]
-        missile = self._make_missile_stub(unit_id, tracks)
+        missile = self._make_missile_stub(track_tid, tracks)
 
         prov = GuidanceTargetProvider(missile)
         prov.update(sim=_make_sim(unit_id), tick_secs=0.5)
@@ -280,7 +262,7 @@ class TestTargetProviderTid:
         unit_id_a = "target-001"
         unit_id_b = "target-002"
         tracks_a = [self._make_track(42, unit_id_a)]
-        missile = self._make_missile_stub(unit_id_a, tracks_a)
+        missile = self._make_missile_stub(42, tracks_a)
 
         prov = GuidanceTargetProvider(missile)
         prov.update(sim=_make_sim(unit_id_a), tick_secs=0.5)
@@ -304,7 +286,7 @@ class TestTargetProviderTid:
 
         unit_id = "target-001"
         tracks = [self._make_track(42, unit_id)]
-        missile = self._make_missile_stub(unit_id, tracks)
+        missile = self._make_missile_stub(42, tracks)
 
         prov = GuidanceTargetProvider(missile)
         prov.update(sim=_make_sim(unit_id), tick_secs=0.5)

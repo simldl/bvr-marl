@@ -1,12 +1,14 @@
 import numpy as np
 import pytest
 
-from bvr_marl_core.rl.environment.gym.gym_components.config import AWACSConfigData
+from bvr_marl_core.rl.environment.gym.gym_components.config import AWACSConfigData, BVREnvConfig
 from bvr_marl_core.rl.environment.gym.spawn_utils import (
     MapBoundaryChecker,
     compute_awacs_orbit_center,
+    spawn_awacs,
     spawn_position,
     spawn_unit,
+    spawn_unit_with_geometry,
 )
 from bvr_marl_core.simulator.core.helpers import Position
 
@@ -31,11 +33,15 @@ class DummyAircraft:
 class DummySim:
     def __init__(self):
         self.units = []
+        self.active_units = {}
         self.calls = []
 
     def add_unit(self, unit):
         self.units.append(unit)
-        return len(self.units)
+        uid = len(self.units)
+        unit.id = uid
+        self.active_units[uid] = unit
+        return uid
 
     def record_unit_trace(self, uid):
         self.calls.append(uid)
@@ -48,6 +54,17 @@ class DummyEnv:
         self.map_limits = DummyMapLimits()
         self.simulator = DummySim()
         self.config = {"default_speed": 300}
+
+
+def _dummy_awacs_env(config_dict: dict):
+    bvr_config = BVREnvConfig.from_dict(config_dict)
+    env = type("AwacsEnv", (), {})()
+    env.config = {}
+    env.map_size_km = bvr_config.map_size_km
+    env.map_limits = bvr_config.map_limits
+    env.full_map_limits = bvr_config.full_map_limits
+    env.simulator = DummySim()
+    return env, bvr_config.scenario_config.awacs_config
 
 
 def test_spawn_position_agent_and_opponent():
@@ -81,6 +98,71 @@ def test_spawn_unit_registers():
     uid = spawn_unit(env, "A", "agent")
     assert uid == 1
     assert isinstance(env.simulator.units[0], DummyAircraft)
+
+
+def test_spawn_unit_marks_anchored_opponent_boundary_kept():
+    env = DummyEnv()
+    env.config = {
+        "default_speed": 300,
+        "scenario_config": {"opponent_behavior": "anchored_hold"},
+    }
+
+    uid = spawn_unit(env, "B", "opponent")
+    unit = env.simulator.active_units[uid]
+
+    assert unit.keep_inside_boundary is True
+    assert unit.scripted_anchor_position is not unit.position
+    assert unit.scripted_anchor_position.lat == pytest.approx(unit.position.lat)
+    assert unit.scripted_anchor_position.lon == pytest.approx(unit.position.lon)
+
+
+def test_spawn_unit_marks_stationary_opponent_boundary_kept():
+    env = DummyEnv()
+    env.config = {
+        "default_speed": 300,
+        "scenario_config": {"opponent_behavior": "stationary_hold"},
+    }
+
+    uid = spawn_unit(env, "B", "opponent")
+    unit = env.simulator.active_units[uid]
+
+    assert unit.keep_inside_boundary is True
+
+
+def test_spawn_unit_with_geometry_marks_anchored_opponent_boundary_kept():
+    env = DummyEnv()
+    env.config = {"scenario_config": {"opponent_behavior": "anchored_hold"}}
+    pos = Position(lat=0.9, lon=0.9, alt=8000.0)
+
+    uid = spawn_unit_with_geometry(env, "B", "opponent", pos, heading=270.0, speed=250.0)
+    unit = env.simulator.active_units[uid]
+
+    assert unit.keep_inside_boundary is True
+    assert unit.scripted_anchor_position.lat == pytest.approx(0.9)
+    assert unit.scripted_anchor_position.lon == pytest.approx(0.9)
+
+
+def test_spawn_unit_with_geometry_marks_stationary_opponent_boundary_kept():
+    env = DummyEnv()
+    env.config = {"scenario_config": {"opponent_behavior": "stationary_hold"}}
+    pos = Position(lat=0.9, lon=0.9, alt=8000.0)
+
+    uid = spawn_unit_with_geometry(env, "B", "opponent", pos, heading=270.0, speed=250.0)
+    unit = env.simulator.active_units[uid]
+
+    assert unit.keep_inside_boundary is True
+    assert unit.scripted_anchor_position.lat == pytest.approx(0.9)
+    assert unit.scripted_anchor_position.lon == pytest.approx(0.9)
+
+
+def test_policy_opponent_is_not_boundary_clamped_by_spawn():
+    env = DummyEnv()
+    env.config = {"scenario_config": {"opponent_behavior": "policy"}}
+
+    uid = spawn_unit(env, "B", "opponent")
+    unit = env.simulator.active_units[uid]
+
+    assert not getattr(unit, "keep_inside_boundary", False)
 
 
 def test_map_boundary_checker():
@@ -199,6 +281,86 @@ class TestAWACSConfigData:
 
         # Detection FOV is set in AWACS.Config, not here
         # This just configures what lock_fov_deg to pass to AWACS
+
+    def test_fixed_side_zone_orbit_is_default(self):
+        """AWACS should not chase fighter geometry unless explicitly configured."""
+        config = AWACSConfigData()
+        assert config.trail_fighters is False
+
+    def test_spawn_awacs_uses_configured_fixed_orbit_center(self):
+        env, awacs_config = _dummy_awacs_env(
+            {
+                "num_agents_per_side": 1,
+                "map_size": 160,
+                "scenario_config": {
+                    "awacs_config": {
+                        "agent_awacs": True,
+                        "orbit_distance_km": 80.0,
+                        "orbit_radius_km": 25.0,
+                    },
+                },
+            }
+        )
+
+        uid = spawn_awacs(env, "agent", awacs_config)
+        awacs = env.simulator.active_units[uid]
+        orbit_config = awacs.orbit_controller.config
+
+        assert awacs.position.lat == pytest.approx(0.0)
+        assert awacs.position.lon == pytest.approx(-(80.0 / 111.0))
+        assert orbit_config.center_lat == pytest.approx(0.0)
+        assert orbit_config.center_lon == pytest.approx(-(80.0 / 111.0))
+        assert orbit_config.trail_fighters is False
+        assert awacs.map_limits.right_lon == pytest.approx(105.0 / 111.0)
+
+
+class TestAWACSSplit:
+    """Tests for the two-less-potent-AWACS split (count_per_team, radar overrides)."""
+
+    def test_default_is_two_less_potent_awacs(self):
+        config = AWACSConfigData()
+        assert config.count_per_team == 2
+
+    def test_placements_are_symmetric_north_south(self):
+        from bvr_marl_core.rl.environment.gym.gym_components.episode_manager import (
+            _awacs_placements,
+        )
+
+        placements = _awacs_placements(AWACSConfigData(awacs_pair_spacing_km=120.0))
+        assert len(placements) == 2
+        (lat_lo, suf_lo), (lat_hi, suf_hi) = placements
+        assert lat_lo == pytest.approx(-120.0 / 111.0 / 2.0)
+        assert lat_hi == pytest.approx(+120.0 / 111.0 / 2.0)
+        assert suf_lo == "_1" and suf_hi == "_2"
+
+    def test_single_awacs_sits_on_axis(self):
+        from bvr_marl_core.rl.environment.gym.gym_components.episode_manager import (
+            _awacs_placements,
+        )
+
+        assert _awacs_placements(AWACSConfigData(count_per_team=1)) == [(0.0, "")]
+
+    def test_awacs_radar_defaults_to_less_potent_250km(self):
+        env, awacs_config = _dummy_awacs_env(
+            {"scenario_config": {"awacs_config": {"agent_awacs": True}}}
+        )
+        uid = spawn_awacs(env, "agent", awacs_config)
+        awacs = env.simulator.active_units[uid]
+        assert awacs.radar.max_range_m == pytest.approx(250_000.0)
+        assert awacs.radar.h_fov_deg == pytest.approx(360.0)
+
+    def test_radar_overrides_apply(self):
+        env, awacs_config = _dummy_awacs_env(
+            {"scenario_config": {"awacs_config": {"agent_awacs": True}}}
+        )
+        uid = spawn_awacs(
+            env,
+            "agent",
+            awacs_config,
+            radar_overrides={"radar_max_range_m": 300_000.0},
+        )
+        awacs = env.simulator.active_units[uid]
+        assert awacs.radar.max_range_m == pytest.approx(300_000.0)
 
 
 class TestAWACSNonEngageable:

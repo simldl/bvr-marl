@@ -119,7 +119,8 @@ def test_tracker_focus(sim, map_limits):
     locked = False
     for i in range(50):
         sim.do_tick()
-        if blue.sensor.has_radar_lock(target):
+        contact_ids = sim.evaluator_contact_ids_for_truth(blue.id, target.id)
+        if contact_ids & set(blue.sensor.get_locked_targets()):
             locked = True
             break
     assert locked, "No radar lock before missile launch."

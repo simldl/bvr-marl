@@ -4,7 +4,6 @@ import math
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from dataclasses import dataclass, field
-from typing import Optional
 
 from bvr_marl_core.simulator.core.helpers import Position
 from bvr_marl_core.simulator.utils.angles import normalize_angle, yaw_geo_to_math
@@ -62,23 +61,12 @@ class FlyingUnit(Unit):
         self._vel_key = (None, None, None)  # (speed, yaw_deg, pitch_deg)
 
     def update(self, tick_secs: float, sim) -> list:
-        events = []
-        if self.speed > 0.0:
-            distance = self.speed * tick_secs
-            pitch_rad = math.radians(self.pitch_deg)
-            vertical = self.speed * math.sin(pitch_rad) * tick_secs
-            lat, lon, alt = geodetic_direct(
-                self.position.lat,
-                self.position.lon,
-                self.position.alt,
-                self.yaw_deg,
-                distance,
-                vertical_distance=vertical,
-            )
-            self.position.lat, self.position.lon, self.position.alt = lat, lon, alt
-        return events
+        return self._advance_position(tick_secs)
 
     def physics_step(self, tick_secs: float, sim) -> list:
+        return self._advance_position(tick_secs)
+
+    def _advance_position(self, tick_secs: float) -> list:
         events = []
         if self.speed > 0.0:
             distance = self.speed * tick_secs

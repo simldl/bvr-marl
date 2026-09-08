@@ -4,11 +4,20 @@ from bvr_marl_core.rl.environment.spaces.obs_space_manager import (
     EnvConfig,
     ObservationSpaceManager,
 )
+from bvr_marl_core.rl.environment.spaces.observation.constants import (
+    d_EF,
+    d_EM,
+    d_FF,
+    d_FM,
+    d_MWS,
+    d_OWN,
+    d_PR,
+)
 
 
 def test_observation_space_manager():
     cfg = EnvConfig(
-        own_dim=21,
+        own_dim=d_OWN,
         fm_slots=2,
         ff_slots=1,
         em_slots=2,
@@ -25,45 +34,52 @@ def test_observation_space_manager():
     keys = list(space.keys())
     print("Space keys:", keys)
 
-    # Check individual keys (updated for new structure)
-    assert "own_state" in keys
-    assert "friendly_missiles" in keys
-    assert "mask_friendly_missiles" in keys
-    assert "friendly_fighters" in keys
-    assert "mask_friendly_fighters" in keys
-    assert "fm_target_indices" in keys
-    assert "mask_fm_targets" in keys
-    assert "ff_lock_indices" in keys
-    assert "mask_ff_locks" in keys
-    assert "enemy_missiles" in keys
-    assert "mask_enemy_missiles" in keys
-    assert "enemy_fighters" in keys
-    assert "mask_enemy_fighters" in keys
-    # REMOVED: NEZ is now embedded in enemy_fighters, not separate arrays
-    # assert "enemy_nez_active" in keys
-    # assert "enemy_nez_passive" in keys
-    assert "missile_warning_flag" in keys
-    assert "missile_warning_dirs" in keys
-    assert "mask_warning_dirs" in keys
-    assert "passive_radar" in keys
-    assert "mask_passive_radar" in keys
+    # Mask-driven token structure: entity blocks only, mask folded into tokens.
+    assert set(keys) == {
+        "own_state",
+        "friendly_missiles",
+        "friendly_fighters",
+        "enemy_missiles",
+        "enemy_fighters",
+        "missile_warnings",
+        "passive_radar",
+    }
+    # No separate mask/index keys remain.
+    assert not any(k.startswith("mask_") for k in keys)
+    assert "fm_target_indices" not in keys and "ff_lock_indices" not in keys
 
-    # Check shapes (updated dimensions)
-    assert space["own_state"].shape == (21,)
-    assert space["friendly_missiles"].shape == (2 * 8,)  # Updated from 6 to 8 dims/slot
-    assert space["friendly_fighters"].shape == (1 * 6,)  # Unchanged
-    assert space["fm_target_indices"].shape == (2 * 1,)
-    assert space["ff_lock_indices"].shape == (1 * 1,)
-    assert space["enemy_missiles"].shape == (2 * 7,)  # Updated from 6 to 7 dims/slot
-    assert space["enemy_fighters"].shape == (
-        1 * 10,
-    )  # Updated from 9 to 10 dims/slot (includes is_support_asset)
-    # REMOVED: NEZ arrays no longer exist
-    # assert space["enemy_nez_active"].shape == (1,)
-    # assert space["enemy_nez_passive"].shape == (1,)
-    assert space["missile_warning_flag"].shape == (1,)
-    assert space["missile_warning_dirs"].shape == (2 * (1 + 4),)  # em_slots * warn_dim
-    assert space["passive_radar"].shape == (1 * 3,)
+    # Check shapes (slots * token_dim, mask column included in token_dim).
+    assert space["own_state"].shape == (d_OWN,)
+    assert space["friendly_missiles"].shape == (2 * d_FM,)
+    assert space["friendly_fighters"].shape == (1 * d_FF,)
+    assert space["enemy_missiles"].shape == (2 * d_EM,)
+    assert space["enemy_fighters"].shape == (1 * d_EF,)
+    assert space["missile_warnings"].shape == (2 * d_MWS,)
+    assert space["passive_radar"].shape == (1 * d_PR,)
 
     all_spaces = mgr.all()
     assert set(all_spaces.keys()) == {"A1", "B1"}
+
+
+def test_env_own_state_dim_tracks_d_OWN_and_total_matches():
+    """The runtime env's own_state_dim must equal d_OWN, and the built space's
+    total must equal get_total_obs_dim() (the two obs systems must not drift)."""
+    from gymnasium.spaces.utils import flatdim
+
+    from bvr_marl_core.rl.environment.gym.bvr_multi_agent_env import BVRMultiAgentEnv
+    from bvr_marl_core.rl.environment.spaces.observation.constants import get_total_obs_dim
+    from bvr_marl_core.simulator.simulator import Simulator
+
+    env = BVRMultiAgentEnv(
+        {"simulator": Simulator(weapon_config={}), "num_agents_per_side": 2, "map_size": 200}
+    )
+    obs, _ = env.reset()
+    assert env.config.own_state_dim == d_OWN
+
+    space = env.observation_space["A0"]
+    total = sum(flatdim(s) for s in space.spaces.values())
+    assert total == get_total_obs_dim()
+    # Actual observation arrays match the declared space exactly (no coercion pad).
+    for key, subspace in space.spaces.items():
+        assert obs["A0"][key].shape[0] == flatdim(subspace)
+    env.close()

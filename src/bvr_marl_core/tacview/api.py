@@ -1,4 +1,4 @@
-"""Stable public Tacview API for bvr-marl-core extensions."""
+"""Stable public Tacview API for bvr-marl extensions."""
 
 from __future__ import annotations
 

@@ -1,6 +1,3 @@
-import random
-from typing import Optional
-
 import numpy as np
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
@@ -54,12 +51,10 @@ class BaseMultiAgentEnv(MultiAgentEnv):
     def seed(self, seed: int | None = None):
         if seed is None:
             return
-        np.random.seed(seed)
-        random.seed(seed)
         if hasattr(self.simulator, "seed"):
             try:
                 self.simulator.seed(seed)
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
 
     def get_action_space(self, agent_id):

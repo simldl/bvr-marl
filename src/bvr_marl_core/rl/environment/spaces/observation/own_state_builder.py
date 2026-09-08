@@ -1,13 +1,23 @@
 """
 Own state builder for agent observations.
-Builds comprehensive self-state including DLZ zone, envelope, radar, and boundary information.
+Builds compact self-state: energy/orientation, weapon/envelope readiness,
+radar lock, and directional horizontal + altitude boundary awareness.
 """
+
+import math
 
 import numpy as np
 
+from bvr_marl_core.domain.information_mode import InformationMode, resolve_information_mode
+from bvr_marl_core.domain.tactical_contact import TacticalContact
+from bvr_marl_core.rl.environment.spaces.observation.constants import (
+    OWN_EMCON_TOGGLE_REF_STEPS,
+    own_state_dim,
+)
 from bvr_marl_core.tactical import ObservationHelper
 
-from .constants import d_OWN
+# Endurance reference (s) for normalizing station time (~1 hour).
+_STATION_TIME_REF_S = 3600.0
 
 
 class OwnStateBuilder:
@@ -23,6 +33,12 @@ class OwnStateBuilder:
         """
         self.simulator = simulator
         self.config = config
+        self.information_mode = resolve_information_mode(
+            getattr(config, "information_mode", None), default=InformationMode.SENSOR_LIMITED
+        )
+        # Active sensing: widen the ownship vector with own radar-emission state.
+        self.emcon_action_enabled = bool(getattr(config, "emcon_action_enabled", False))
+        self._own_dim = own_state_dim(self.emcon_action_enabled)
         self._obs_helpers = {}
 
     def _get_obs_helper(self, unit) -> ObservationHelper:
@@ -33,86 +49,109 @@ class OwnStateBuilder:
 
     def build(self, unit) -> np.ndarray:
         """
-        Build own state vector using ObservationHelper for consistency.
+        Build the own-state vector (``d_OWN`` features, all normalized to ~[-1, 1]).
 
-        Returns 21-element vector (reduced from 22, removed artificial SQI):
-        [0-5]:   Position/orientation (lat, lon, alt, yaw, speed, pitch)
-        [6]:     Remaining missiles (normalized)
-        [7]:     Ps (specific excess power, kW normalized)
-        [8]:     DLZ zone encoded [0-1] (R1=0.25, R2=0.5, R3=0.75, R4=1.0)
-        [9-10]:  Envelope scalars (s_factor, c_factor)
-        [11]:    Radar max range (normalized to 150km)
-        [12]:    Radar FOV (normalized to 180deg)
-        [13]:    Own RCS (normalized to 10 m²)
-        [14]:    Radar power (normalized)
-        [15]:    Radar lock quality [0-1]
-        [16-17]: Boundary distances normalized [0-1] (min of left/right, min of bottom/top)
-        [18-20]: Reserved for future use (set to 0)
+        See ``constants.d_OWN`` for the authoritative index layout. Summary:
+        heading sin/cos, speed, pitch, remaining missiles, Ps, radar-lock quality,
+        episode time remaining, can-fire flag, horizontal-boundary cues (3),
+        altitude-boundary cues (2), fuel fraction, and station time.
 
-        REMOVED (moved to metrics/evaluation, per-fighter NEZ, or redundant):
-        - SQI (artificial shot-quality metric; not policy input)
-        - nez_visible (redundant with per-fighter NEZ)
-        - DLZ ranges (r_min, r_tr, r_pi, r_aero) - redundant with per-fighter data
-        - slant_range_to_target - can be computed from enemy fighter relative position
+        The envelope scalars (s_factor, c_factor) and the in-envelope flag were
+        dropped in the observation-space rework: they are redundant with the
+        enemy-fighter shot cues (DLZ zone / SQI) and the can-fire flag.
 
         Args:
             unit: Aircraft unit
 
         Returns:
-            np.ndarray: 21-element state vector
+            np.ndarray: ``d_OWN``-element state vector
         """
         obs_helper = self._get_obs_helper(unit)
-        target = getattr(unit, "target", None)
-
-        # DLZ zone stays as a coarse tactical input; SQI is deliberately omitted.
-        dlz_zone = self._get_dlz_zone_feature(obs_helper, target)
-
-        # Get Ps (specific excess power)
-        ps_normalized = self._get_specific_excess_power(unit)
-
-        # Get envelope scalars
-        envelope_features = self._get_envelope_features(unit)
-
-        # Get radar features
-        radar_features = self._get_radar_features(unit, obs_helper, target)
-
-        # Get boundary features (compressed to 2 values)
-        boundary_features = self._get_boundary_features_compressed(unit)
-
-        weapons_state = obs_helper.get_weapons_state()
-        remaining_missiles = float(weapons_state.get("remaining_missiles", 0.0))
-
-        # Build complete state vector
-        state = np.array(
-            [
-                unit.position.lat,
-                unit.position.lon,
-                unit.position.alt,
-                unit.yaw_deg,
-                unit.speed,
-                unit.pitch_deg,
-                remaining_missiles,
-                ps_normalized,
-                dlz_zone,
-                *envelope_features,
-                *radar_features,
-                *boundary_features,
-                0.0,
-                0.0,
-                0.0,  # Reserved slots
-            ],
-            dtype=np.float32,
+        target = (
+            self._locked_contact(unit)
+            if self.information_mode is InformationMode.SENSOR_LIMITED
+            else getattr(unit, "target", None)
         )
 
-        assert len(state) == d_OWN, f"OwnState dimension mismatch: {len(state)} != {d_OWN}"
+        ps_normalized = self._get_specific_excess_power(unit)
+        radar_lock_quality = self._get_radar_lock_quality(unit, obs_helper, target)
+        tactical_cues = self._get_tactical_cues(obs_helper, target)
+        boundary_direction_features = self._get_boundary_direction_features(unit)
+        altitude_boundary_features = self._get_altitude_boundary_features(unit)
+
+        weapons_state = obs_helper.get_weapons_state()
+        remaining_raw = float(weapons_state.get("remaining_missiles", 0.0))
+        max_missiles = float(getattr(unit, "max_missiles", 0.0)) or 8.0
+        remaining_missiles = float(np.clip(remaining_raw / max_missiles, 0.0, 1.0))
+
+        # Normalize orientation/energy: heading as sin/cos (wraparound-safe),
+        # speed by max speed, pitch by 90deg.
+        yaw_rad = math.radians(float(getattr(unit, "yaw_deg", 0.0)))
+        max_speed = float(getattr(unit, "max_speed_mps", 0.0)) or 600.0
+        speed_norm = float(np.clip(float(getattr(unit, "speed", 0.0)) / max_speed, 0.0, 1.0))
+        pitch_norm = float(np.clip(float(getattr(unit, "pitch_deg", 0.0)) / 90.0, -1.0, 1.0))
+
+        fuel_system = getattr(unit, "fuel", None)
+        fuel_fraction = float(fuel_system.fuel_fraction) if fuel_system is not None else 1.0
+        # On-station endurance normalized by a 1-hour reference, clipped to [0, 1].
+        station_time = (
+            float(np.clip(fuel_system.station_time_s / _STATION_TIME_REF_S, 0.0, 1.0))
+            if fuel_system is not None
+            else 1.0
+        )
+
+        features = [
+            math.sin(yaw_rad),
+            math.cos(yaw_rad),
+            speed_norm,
+            pitch_norm,
+            remaining_missiles,
+            ps_normalized,
+            radar_lock_quality,
+            *tactical_cues,
+            *boundary_direction_features,
+            *altitude_boundary_features,
+            fuel_fraction,
+            station_time,
+        ]
+        if self.emcon_action_enabled:
+            features.extend(self._emcon_features(unit))
+
+        state = np.array(features, dtype=np.float32)
+        assert len(state) == self._own_dim, (
+            f"OwnState dimension mismatch: {len(state)} != {self._own_dim}"
+        )
         return state
 
-    def _get_dlz_zone_feature(self, obs_helper, target) -> float:
-        """Extract only the coarse DLZ zone feature."""
-        dlz_nez = obs_helper.get_dlz_nez_features(target)
+    def _emcon_features(self, unit) -> list[float]:
+        """Own radar-emission state: [emitting flag, duty cycle, time since toggle]."""
+        emitting = 1.0 if bool(getattr(unit, "radar_emitting", True)) else 0.0
+        tracker = getattr(unit, "emission_tracker", None)
+        if tracker is None:
+            return [emitting, 1.0, 1.0]
+        duty = float(np.clip(tracker.duty_cycle, 0.0, 1.0))
+        since_toggle = float(
+            np.clip(tracker.steps_since_toggle / OWN_EMCON_TOGGLE_REF_STEPS, 0.0, 1.0)
+        )
+        return [emitting, duty, since_toggle]
 
-        dlz_zone_map = {"R1": 0.25, "R2": 0.5, "R3": 0.75, "R4": 1.0}
-        return dlz_zone_map.get(dlz_nez.get("zone", "R4"), 1.0)
+    @staticmethod
+    def _locked_contact(unit) -> TacticalContact | None:
+        """Return a lock-grade operational contact for ownship tactical cues."""
+        sensor = getattr(unit, "sensor", None)
+        try:
+            locked_ids = set(sensor.get_locked_targets() or ())
+        except (AttributeError, TypeError, ValueError):
+            return None
+        for track in getattr(sensor, "sensor_tracks", ()) or ():
+            if track.track_id in locked_ids:
+                try:
+                    contact = sensor.tactical_contact(track)
+                except (TypeError, ValueError):
+                    continue
+                if contact.engageable and not contact.suspect_deception and not contact.is_missile:
+                    return contact
+        return None
 
     def _get_specific_excess_power(self, unit) -> float:
         """
@@ -139,85 +178,144 @@ class OwnStateBuilder:
         except Exception:
             return 0.5  # Neutral value if calculation fails
 
-    def _get_envelope_features(self, unit) -> list:
-        """Get envelope scalars from action processor (2 elements)."""
-        s_factor = 1.0
-        c_factor = 1.0
-        try:
-            if hasattr(self.simulator, "action_processor"):
-                action_proc = self.simulator.action_processor
-                if hasattr(action_proc, "get_envelope_scalars"):
-                    envelope_data = action_proc.get_envelope_scalars(unit.id)
-                    s_factor = envelope_data.get("s_factor", 1.0)
-                    c_factor = envelope_data.get("c_factor", 1.0)
-        except Exception:
-            pass
-        return [s_factor, c_factor]
+    def _get_radar_lock_quality(self, unit, obs_helper, target) -> float:
+        """Radar lock quality on the selected target [0-1] (dynamic).
 
-    def _get_radar_features(self, unit, obs_helper, target) -> list:
-        """Get radar-specific features (5 elements)."""
-        radar_max_range_norm = 0.0
-        radar_fov_norm = 0.0
-        own_rcs_norm = 0.0
-        radar_power_norm = 0.0
-        radar_lock_quality = 0.0
-
-        if hasattr(unit, "radar"):
-            radar = unit.radar
-            radar_max_range_norm = getattr(radar, "max_range_m", 0.0) / 150000.0
-            radar_fov_norm = getattr(radar, "h_fov_deg", 0.0) / 180.0
-            tx_p = getattr(
-                radar, "tx_power_w", getattr(radar, "power_w", getattr(radar, "power", 0.0))
-            )
-            radar_power_norm = tx_p / 1000.0
-
-        if hasattr(unit, "rcs"):
-            own_rcs_norm = getattr(unit, "rcs", 0.0) / 10.0
-
+        Static radar parameters (max range, FOV, RCS, tx power) are deliberately
+        omitted: they are constant per aircraft type and carry no per-step signal.
+        """
         if target:
             lock_data = obs_helper.get_lock_quality(target)
-            radar_lock_quality = lock_data.get("lock_strength", 0.0)
+            return float(lock_data.get("lock_strength", 0.0))
+        return 0.0
 
-        return [
-            radar_max_range_norm,
-            radar_fov_norm,
-            own_rcs_norm,
-            radar_power_norm,
-            radar_lock_quality,
-        ]
+    def _get_tactical_cues(self, obs_helper, target) -> list:
+        """Two actionable tactical scalars (episode time, fire readiness).
 
-    def _get_boundary_features_compressed(self, unit) -> list:
+        - time_remaining [0-1]: fraction of the episode left (1=fresh, 0=timeout
+          imminent), so the policy can reason about committing before a timeout.
+        - can_fire [0/1]: every launch gate passed *right now* (lock, FOV, gimbal,
+          range, inventory, cooldown) — the actionable "may I shoot" signal that
+          remaining-missile count alone does not convey.
+
+        The former in-envelope cue was removed from the observation, so it is no
+        longer computed here (it triggered an otherwise-unneeded DLZ dict build).
         """
-        Get compressed boundary distance features (2 elements).
+        episode_max_s = float(getattr(self.simulator, "episode_max_s", 0.0))
+        elapsed_s = float(getattr(self.simulator, "elapsed_time_s", 0.0))
+        time_remaining = (
+            float(np.clip(1.0 - elapsed_s / episode_max_s, 0.0, 1.0))
+            if episode_max_s > 0.0
+            else 1.0
+        )
 
-        Instead of 4 separate distances, compute:
-        - min(left, right) - how close to horizontal boundaries
-        - min(bottom, top) - how close to vertical boundaries
+        can_fire = 0.0
+        if target:
+            try:
+                can_fire = (
+                    1.0
+                    if obs_helper.get_fire_feasibility(target, simulator=self.simulator).get(
+                        "can_fire"
+                    )
+                    else 0.0
+                )
+            except Exception:
+                can_fire = 0.0
 
-        This reduces dimensionality while preserving boundary proximity information.
+        return [time_remaining, can_fire]
+
+    def _get_boundary_direction_features(self, unit) -> list:
+        """Directional horizontal-boundary cues (3 elements).
+
+        Encodes *which* edge is near and whether the aircraft is heading at it —
+        the information a policy needs to avoid a boundary death:
+          - signed horizontal position in box [-1,1]  (-1=left edge, +1=right edge)
+          - signed vertical position in box   [-1,1]  (-1=bottom edge, +1=top edge)
+          - closing rate toward the NEAREST horizontal edge, normalized by max
+            speed, in [-1,1] (>0 = flying toward that edge / about to exit).
+
+        Returns neutral zeros when map limits are unavailable.
         """
-        boundary_dist_horizontal = 0.5
-        boundary_dist_vertical = 0.5
+        signed_h = 0.0
+        signed_v = 0.0
+        closing_norm = 0.0
 
-        if hasattr(self.simulator, "map_limits"):
-            map_limits = self.simulator.map_limits
-            lat = unit.position.lat
-            lon = unit.position.lon
+        map_limits = getattr(self.simulator, "map_limits", None)
+        if map_limits is None:
+            return [signed_h, signed_v, closing_norm]
 
-            lon_extent = map_limits.longitude_extent()
-            lat_extent = map_limits.latitude_extent()
+        lat = unit.position.lat
+        lon = unit.position.lon
+        lon_extent = map_limits.longitude_extent()
+        lat_extent = map_limits.latitude_extent()
 
-            if lon_extent > 0:
-                dist_left = (lon - map_limits.left_lon) / lon_extent
-                dist_right = (map_limits.right_lon - lon) / lon_extent
-                boundary_dist_horizontal = min(dist_left, dist_right)
+        if lon_extent > 0:
+            center_lon = 0.5 * (map_limits.left_lon + map_limits.right_lon)
+            signed_h = float(np.clip(2.0 * (lon - center_lon) / lon_extent, -1.0, 1.0))
+        if lat_extent > 0:
+            center_lat = 0.5 * (map_limits.bottom_lat + map_limits.top_lat)
+            signed_v = float(np.clip(2.0 * (lat - center_lat) / lat_extent, -1.0, 1.0))
 
-            if lat_extent > 0:
-                dist_bottom = (lat - map_limits.bottom_lat) / lat_extent
-                dist_top = (map_limits.top_lat - lat) / lat_extent
-                boundary_dist_vertical = min(dist_bottom, dist_top)
+        if lon_extent > 0 and lat_extent > 0:
+            # Geographic yaw convention: 0deg = North, 90deg = East
+            # (see physics.flying_objects), so velocity decomposes as:
+            yaw_rad = math.radians(getattr(unit, "yaw_deg", 0.0))
+            pitch_rad = math.radians(getattr(unit, "pitch_deg", 0.0))
+            horiz_speed = float(getattr(unit, "speed", 0.0)) * math.cos(pitch_rad)
+            v_north = horiz_speed * math.cos(yaw_rad)  # toward +lat
+            v_east = horiz_speed * math.sin(yaw_rad)  # toward +lon
 
-            boundary_dist_horizontal = np.clip(boundary_dist_horizontal, 0.0, 1.0)
-            boundary_dist_vertical = np.clip(boundary_dist_vertical, 0.0, 1.0)
+            # Normalized distance and outward-closing speed (m/s) for each edge.
+            # Outward closing > 0 means the velocity points toward that edge.
+            edges = (
+                ((lon - map_limits.left_lon) / lon_extent, -v_east),  # left
+                ((map_limits.right_lon - lon) / lon_extent, v_east),  # right
+                ((lat - map_limits.bottom_lat) / lat_extent, -v_north),  # bottom
+                ((map_limits.top_lat - lat) / lat_extent, v_north),  # top
+            )
+            _, closing_mps = min(edges, key=lambda e: e[0])
+            max_speed = float(getattr(unit, "max_speed_mps", 0.0)) or 600.0
+            closing_norm = float(np.clip(closing_mps / max_speed, -1.0, 1.0))
 
-        return [boundary_dist_horizontal, boundary_dist_vertical]
+        return [signed_h, signed_v, closing_norm]
+
+    def _get_altitude_boundary_features(self, unit) -> list:
+        """Altitude-boundary cues (2 elements), the vertical analogue of the
+        horizontal boundary features:
+          - signed altitude in box [-1,1] (-1=floor, +1=ceiling); also a
+            monotonic, well-conditioned stand-in for raw altitude
+          - closing rate toward the nearest floor/ceiling, normalized by max
+            speed, in [-1,1] (>0 = descending into the floor / climbing into the
+            ceiling, whichever is nearer).
+
+        Floor/ceiling are taken from the aircraft clamp bounds, falling back to
+        map limits then a default span. Returns zeros if no span is resolvable.
+        """
+        signed_alt = 0.0
+        alt_closing = 0.0
+        alt = float(getattr(unit.position, "alt", 0.0))
+
+        min_alt = getattr(unit, "min_alt_m", None)
+        max_alt = getattr(unit, "max_alt_m", None)
+        if min_alt is None or max_alt is None:
+            map_limits = getattr(self.simulator, "map_limits", None)
+            if map_limits is not None:
+                min_alt = getattr(map_limits, "min_alt", min_alt)
+                max_alt = getattr(map_limits, "max_alt", max_alt)
+        if min_alt is None or max_alt is None or max_alt <= min_alt:
+            return [signed_alt, alt_closing]
+
+        extent = max_alt - min_alt
+        center = 0.5 * (min_alt + max_alt)
+        signed_alt = float(np.clip(2.0 * (alt - center) / extent, -1.0, 1.0))
+
+        pitch_rad = math.radians(getattr(unit, "pitch_deg", 0.0))
+        v_up = float(getattr(unit, "speed", 0.0)) * math.sin(pitch_rad)  # + = climbing
+        dist_floor = (alt - min_alt) / extent
+        dist_ceiling = (max_alt - alt) / extent
+        # Closing toward the nearer altitude bound (>0 = approaching it).
+        closing_mps = -v_up if dist_floor <= dist_ceiling else v_up
+        max_speed = float(getattr(unit, "max_speed_mps", 0.0)) or 600.0
+        alt_closing = float(np.clip(closing_mps / max_speed, -1.0, 1.0))
+
+        return [signed_alt, alt_closing]

@@ -6,7 +6,7 @@ ensuring controlled initial conditions for engagement geometry.
 """
 
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import numpy as np
 
@@ -134,7 +134,23 @@ STUDY_REGIMES: dict[str, GeometryConfig] = {
         agent_altitude_m=8000.0,
         opponent_altitude_m=8000.0,
     ),
+    # Random spawn across the whole map (positions/headings sampled per episode by
+    # ``GeometrySampler.compute_random_map_positions``). The fixed fields below are
+    # only a fallback for callers that ``sample()`` this regime without taking the
+    # random-map spawn path; ``compute_positions`` is not used for it.
+    "random_map": GeometryConfig(
+        range_m=100_000.0,
+        aspect="hot",
+        altitude_split="co_alt",
+        offset_deg=0.0,
+        agent_altitude_m=8000.0,
+        opponent_altitude_m=8000.0,
+    ),
 }
+
+# Regime name that triggers full-map random spawning instead of the fixed
+# west/east geometry computed by ``compute_positions``.
+RANDOM_MAP_REGIME = "random_map"
 
 
 class GeometrySampler:
@@ -286,6 +302,108 @@ class GeometrySampler:
             "geometry": geometry,
         }
 
+    def compute_random_map_positions(
+        self,
+        num_agents: int = 1,
+        num_opponents: int = 1,
+        *,
+        margin_frac: float = 0.2,
+        min_separation_m: float = 40_000.0,
+        max_separation_m: float | None = None,
+        formation_spread_m: float = 2000.0,
+        altitude_range_m: tuple[float, float] = (6000.0, 10000.0),
+        randomize_heading: bool = True,
+        max_resamples: int = 50,
+        rng: np.random.Generator | None = None,
+    ) -> dict[str, Any]:
+        """
+        Sample full-map random spawn positions for both teams.
+
+        Positions are drawn uniformly inside an inner box of the map (the outer
+        ``margin_frac`` fraction on each side is kept clear so aircraft do not
+        start on top of the boundary), with random headings and altitudes. The
+        two team centroids are resampled until they are at least
+        ``min_separation_m`` apart so episodes do not start merged.
+
+        Returns the same dict shape as :meth:`compute_positions` so it can be
+        fed directly to ``spawn_with_geometry_config``.
+        """
+        if rng is None:
+            rng = np.random.default_rng(0)
+
+        half_box_deg = (self.map_size_km / 2.0) / self.km_per_deg
+        usable_half_deg = max(half_box_deg * (1.0 - margin_frac), 0.0)
+        spread_deg = (formation_spread_m / 1000.0) / self.km_per_deg
+        min_sep_deg = (min_separation_m / 1000.0) / self.km_per_deg
+        max_sep_deg = (
+            (max_separation_m / 1000.0) / self.km_per_deg if max_separation_m is not None else None
+        )
+        if max_sep_deg is not None and max_sep_deg < min_sep_deg:
+            raise ValueError(
+                f"max_separation_m ({max_separation_m}) must be >= min_separation_m "
+                f"({min_separation_m}); an empty band would silently fall through to "
+                "an arbitrary best-effort spawn."
+            )
+        alt_lo, alt_hi = altitude_range_m
+
+        def _team_centroid() -> tuple[float, float]:
+            return (
+                float(rng.uniform(-usable_half_deg, usable_half_deg)),
+                float(rng.uniform(-usable_half_deg, usable_half_deg)),
+            )
+
+        agent_centroid = _team_centroid()
+        opponent_centroid = _team_centroid()
+        # Keep the teams apart, and (when asked) within reach of each other; if the map
+        # is too small for the requested band we accept the best effort after
+        # ``max_resamples`` tries.
+        #
+        # The upper bound exists because a floor alone produced a separation the stages
+        # could not train against. Measured on an early stage's config (400 km map,
+        # margin_frac 0.25, min_separation 50 km) over 2000 samples: median 164 km, p75
+        # 217 km, max 396 km, against a Eurofighter radar_max_range_m of 185 km. So a
+        # third of episodes began beyond detection outright and the median one required
+        # closing ~164 km before a lock was even possible. Since the terms that reward
+        # closing are potential-based (policy-invariant), the stage was asking for the
+        # one behaviour its reward function could not pay for, and lock_rate -- and with
+        # it every shot opportunity -- collapsed to zero.
+        for _ in range(max_resamples):
+            dlat = agent_centroid[0] - opponent_centroid[0]
+            dlon = agent_centroid[1] - opponent_centroid[1]
+            separation_deg = (dlat * dlat + dlon * dlon) ** 0.5
+            if separation_deg >= min_sep_deg and (
+                max_sep_deg is None or separation_deg <= max_sep_deg
+            ):
+                break
+            opponent_centroid = _team_centroid()
+
+        def _build_team(centroid: tuple[float, float], count: int):
+            positions: list[Position] = []
+            headings: list[float] = []
+            base_heading = float(rng.uniform(0.0, 360.0)) if randomize_heading else 90.0
+            for i in range(count):
+                lateral = (i - (count - 1) / 2.0) * spread_deg
+                lat = centroid[0] + lateral * np.cos(np.radians(base_heading))
+                lon = centroid[1] + lateral * np.sin(np.radians(base_heading))
+                lat = float(np.clip(lat, -usable_half_deg, usable_half_deg))
+                lon = float(np.clip(lon, -usable_half_deg, usable_half_deg))
+                positions.append(Position(lat=lat, lon=lon, alt=float(rng.uniform(alt_lo, alt_hi))))
+                headings.append(base_heading)
+            return positions, headings
+
+        agent_positions, agent_headings = _build_team(agent_centroid, num_agents)
+        opponent_positions, opponent_headings = _build_team(opponent_centroid, num_opponents)
+
+        return {
+            "agent_positions": agent_positions,
+            "agent_headings": agent_headings,
+            "agent_speed": 250.0,
+            "opponent_positions": opponent_positions,
+            "opponent_headings": opponent_headings,
+            "opponent_speed": 250.0,
+            "geometry": self.sample(RANDOM_MAP_REGIME),
+        }
+
     def sample_with_noise(
         self,
         regime: str,
@@ -310,7 +428,7 @@ class GeometrySampler:
         base = self.sample(regime)
 
         if rng is None:
-            rng = np.random.default_rng()
+            rng = np.random.default_rng(0)
 
         # Add noise to range
         range_noise = rng.normal(0, position_noise_m) if position_noise_m > 0 else 0

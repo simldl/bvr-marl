@@ -5,7 +5,7 @@ This module now imports from the new modular structure.
 All functions are re-exported from observation.helpers for backward compatibility.
 """
 
-from .observation.helpers import (
+from bvr_marl_core.rl.environment.spaces.observation.helpers import (
     build_warn_sector_features,
     extract_feature_matrix,
     mask_for_units,
@@ -17,10 +17,10 @@ from .observation.helpers import (
     rel_state,
     rel_velocity,
 )
-from .observation.helpers import (
+from bvr_marl_core.rl.environment.spaces.observation.helpers import (
     enu_delta_meters as _enu_delta_meters,
 )
-from .observation.helpers import (
+from bvr_marl_core.rl.environment.spaces.observation.helpers import (
     velocity_components as _velocity_components,
 )
 

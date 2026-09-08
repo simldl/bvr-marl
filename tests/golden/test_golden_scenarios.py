@@ -42,8 +42,17 @@ GOLDEN_1V1_TRACE: list[str] = [
     "UnitRegisteredEvent",  # blue1 aircraft
     "UnitRegisteredEvent",  # red1 aircraft
     "UnitRegisteredEvent",  # fired missile
+    "MissileEnteredTerminalRegionEvent",
+    "MissileEngagementEvent",
+    "MissileFuzeTriggeredEvent",
+    "MissileDetonatedEvent",
+    "MissileTerminalEvent",  # structured terminal-outcome record at detonation
+    "AircraftMortallyHitEvent",
     "UnitDestroyedEvent",  # missile destroyed on impact
-    "UnitDestroyedEvent",  # red1 aircraft destroyed
+    "AircraftDestroyedEvent",
+    # Stochastic kill delay: the target is mortally hit at impact but dies after a
+    # short lag, so its destroyed event and the removal-sweep event come later.
+    "UnitRemovedEvent",  # red1 wreck swept from the sim
 ]
 
 GOLDEN_2V2_TRACE: list[str] = [
@@ -53,22 +62,45 @@ GOLDEN_2V2_TRACE: list[str] = [
     "UnitRegisteredEvent",  # red2
     "UnitRegisteredEvent",  # missile from blue1
     "UnitRegisteredEvent",  # missile from blue2
-    # Both blue missiles intercept their paired red. With the sub-stepped flight
-    # plus guidance+radar sub-step, the crossing-geometry CPA is now tight enough
-    # for a kill, so each detonation logs two events (missile self-destruct +
-    # target destroyed).
+    # Both blue missiles intercept their paired red. With the warhead lethal radius
+    # reconciled to the proximity-fuze radius, each crossing-geometry CPA now falls
+    # inside the lethal envelope, so BOTH detonations are kills (previously one
+    # missed): each logs a terminal-outcome record and a missile self-destruct, the
+    # target is mortally hit, and after a short stochastic lag its destroyed and
+    # wreck-removal-sweep events follow.
+    "MissileEnteredTerminalRegionEvent",
+    "MissileEngagementEvent",
+    "MissileEnteredTerminalRegionEvent",
+    "MissileEngagementEvent",
+    "MissileFuzeTriggeredEvent",
+    "MissileDetonatedEvent",
+    "MissileTerminalEvent",
+    "AircraftMortallyHitEvent",
     "UnitDestroyedEvent",
+    "AircraftDestroyedEvent",
+    "MissileFuzeTriggeredEvent",
+    "MissileDetonatedEvent",
+    "MissileTerminalEvent",
+    "AircraftMortallyHitEvent",
     "UnitDestroyedEvent",
-    "UnitDestroyedEvent",
-    "UnitDestroyedEvent",
+    "UnitRemovedEvent",
+    "AircraftDestroyedEvent",
+    "UnitRemovedEvent",
 ]
 
 GOLDEN_TERMINAL_TRACE: list[str] = [
     "UnitRegisteredEvent",  # blue1
     "UnitRegisteredEvent",  # red1
     "UnitRegisteredEvent",  # missile (close-range scenario acquires lock quickly)
+    "MissileEnteredTerminalRegionEvent",
+    "MissileEngagementEvent",
+    "MissileFuzeTriggeredEvent",
+    "MissileDetonatedEvent",
+    "MissileTerminalEvent",  # structured terminal-outcome record at detonation
+    "AircraftMortallyHitEvent",
     "UnitDestroyedEvent",  # missile destroyed on impact
-    "UnitDestroyedEvent",  # red1 aircraft destroyed
+    "AircraftDestroyedEvent",
+    "UnitRemovedEvent",  # red1 wreck swept from the sim
 ]
 
 

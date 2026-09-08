@@ -5,11 +5,19 @@ Provides deterministic ordering for target selection.
 
 import math
 
+from bvr_marl_core.domain.tactical_contact import ContactSlotRegistry, TacticalContact
+
 
 class TargetSorter:
     """Sort and manage target selection."""
 
-    def __init__(self, tau_hold_s: float = 2.0, max_missiles_per_target: int = 0):
+    def __init__(
+        self,
+        tau_hold_s: float = 2.0,
+        max_missiles_per_target: int = 0,
+        contact_slots: int = 8,
+        contact_coast_timeout_s: float = 10.0,
+    ):
         """
         Initialize target sorter.
 
@@ -24,6 +32,8 @@ class TargetSorter:
         """
         self.tau_hold_s = tau_hold_s
         self.max_missiles_per_target = int(max_missiles_per_target)
+        self.contact_slots = int(contact_slots)
+        self.contact_coast_timeout_s = float(contact_coast_timeout_s)
 
     def sort_target_candidates(
         self, unit, candidates: list, inbound_counts: dict | None = None
@@ -74,7 +84,33 @@ class TargetSorter:
             "target_hold_time_left_s": 0.0,
             "last_target_bin": -1,
             "target_candidates_sorted": [],
+            "contact_slot_registry": ContactSlotRegistry(
+                self.contact_slots, self.contact_coast_timeout_s
+            ),
+            "contact_slots": (),
         }
+
+    def select_contact(
+        self, unit, action_target: float, state: dict, time_s: float
+    ) -> TacticalContact | None:
+        """Select only from ownship operational tracks, never simulator truth.
+
+        The first action bin is always an explicit no-target choice. Remaining
+        bins address stable slots, including empty slots, so target identity does
+        not shift merely because another contact appears or disappears.
+        """
+        registry = state.get("contact_slot_registry")
+        if not isinstance(registry, ContactSlotRegistry):
+            registry = ContactSlotRegistry(self.contact_slots, self.contact_coast_timeout_s)
+            state["contact_slot_registry"] = registry
+        tracks = getattr(getattr(unit, "sensor", None), "sensor_tracks", ()) or ()
+        converter = getattr(unit.sensor, "tactical_contact", TacticalContact.from_sensor_track)
+        contacts = [converter(track) for track in tracks]
+        slots = registry.update(contacts, time_s)
+        state["contact_slots"] = slots
+        selected = registry.select(action_target, slots)
+        state["selected_track_id"] = None if selected is None else selected.track_id
+        return selected
 
     def select_target(self, unit, simulator, action_target: float, state: dict, dt: float):
         """

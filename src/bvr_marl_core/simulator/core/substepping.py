@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from math import ceil
-from typing import Optional
 
+from bvr_marl_core.simulator.core.events import (
+    MissileEngagementEvent,
+    MissileEnteredTerminalRegionEvent,
+)
 from bvr_marl_core.simulator.core.helpers import clamp, units_distance_km
+from bvr_marl_core.simulator.utils.tick_path import pose_at_fraction, unit_tick_path
 
 
 @dataclass
@@ -20,27 +25,20 @@ class SubstepConfig:
     physics_only: bool = False
 
 
-class Substepper:
-    """Resolves missile <-> target hits at sub-tick resolution.
+class TerminalPathResolver:
+    """Authoritative proximity-fuze resolver over the missile's recorded path.
 
-    The simulator advances every unit once per (coarse) tick.  At BVR closing
-    speeds a single 1 s step moves a missile well over a kilometre, so a hit can
-    be jumped over or a hard-turning endgame can be mis-resolved by a straight
-    chord.  For each engaged (missile, target) pair this class rewinds the pair
-    to its begin-of-tick state and re-integrates ONLY that pair's flight physics
-    in small substeps (a lightweight, pair-local simulation - no radar, guidance
-    recompute, or other units), running a continuous-collision check on every
-    substep.  On geometric contact it defers the kill/no-kill decision to the
-    CCD manager's probabilistic ``on_hit`` callback.
-
-    The substeps are non-authoritative: the pair is restored to its real
-    end-of-tick state afterwards, so the substepper only emits hit events.
+    Missile guidance records the fine path it actually integrated. This resolver
+    walks that path once against a cubic-Hermite target path reconstructed from
+    begin/end position and velocity. It performs no rewind or replay and delegates
+    the sole detonation/lethality decision to ``MissileCCDManager.on_hit``.
     """
 
     def __init__(self, config: SubstepConfig | None = None) -> None:
         self.cfg = config or SubstepConfig()
 
     def run_tick_with_substeps(self, sim, tick_secs: float):
+        self._candidate_ranges_m = {}
         pairs = self._collect_candidates(sim.active_units.values(), sim)
         if not pairs:
             return []
@@ -64,21 +62,65 @@ class Substepper:
         for u in units:
             if not self._is_missile(u):
                 continue
+            if (
+                getattr(u, "should_be_removed", False)
+                and getattr(u, "removal_reason", None) == "target_destroyed"
+            ):
+                continue
             # Resolve the target the missile is actually guiding on. Real missiles
             # carry no `locked_target` object attribute — the lock lives on the
             # radar as a unit ID — so resolve that ID to a unit via sim as the
             # authoritative source, falling back to the missile's target object.
-            tgt = (
-                getattr(u, "locked_target", None)
-                or self._resolve_radar_lock_target(u, sim)
-                or getattr(u, "target", None)
+            operational_track = getattr(u, "weapon_track", None) is not None
+            evaluator_resolver = getattr(sim, "evaluator_target_for_weapon", None)
+            evaluator_target = (
+                evaluator_resolver(u)
+                if isinstance(getattr(sim, "_weapon_truth_associations", None), dict)
+                and callable(evaluator_resolver)
+                else None
             )
+            if operational_track:
+                # Track IDs never enter the physical-unit namespace. Missing
+                # evaluator attribution therefore fails closed.
+                tgt = evaluator_target
+                if tgt is None:
+                    record = getattr(sim, "record_diagnostic", None)
+                    departed = getattr(sim, "evaluator_weapon_target_departed", None)
+                    if callable(departed) and departed(u):
+                        u.should_be_removed = True
+                        u.removal_reason = "target_destroyed"
+                        if callable(record):
+                            record("weapon_target_departed")
+                    elif callable(record):
+                        record("missing_evaluator_target")
+            else:
+                # Explicit legacy/oracle missiles retain object/Unit-ID lookup.
+                tgt = (
+                    evaluator_target
+                    or getattr(u, "locked_target", None)
+                    or self._resolve_radar_lock_target(u, sim)
+                    or getattr(u, "target", None)
+                )
             if tgt is None or getattr(tgt, "is_destroyed", False):
                 continue
             try:
-                if units_distance_km(u, tgt) <= self.cfg.engage_distance_km:
+                distance_km = units_distance_km(u, tgt)
+                # Once a missile has entered the terminal region, keep resolving
+                # the pair while it opens again.  Restricting candidates to the
+                # current range drops the pair immediately after an outside-fuze
+                # CPA; guidance then turns the still-live missile back toward the
+                # aircraft, producing the visible "orbiting" behaviour.
+                ccd = getattr(sim, "ccd", None)
+                engaged = getattr(ccd, "_engaged_once", None)
+                already_terminal = isinstance(engaged, set) and getattr(u, "id", None) in engaged
+                if distance_km <= self.cfg.engage_distance_km or already_terminal:
                     out.append((u, tgt))
-            except Exception:
+                    self._candidate_ranges_m[(getattr(u, "id", None), getattr(tgt, "id", None))] = (
+                        distance_km * 1000.0
+                    )
+            except Exception:  # noqa: BLE001 - substep hot loop: a malformed unit must
+                # never abort candidate collection for the whole tick. Contract is
+                # pinned by test_distance_calculation_exception.
                 continue
         return out
 
@@ -88,12 +130,30 @@ class Substepper:
 
         The missile records the fine positions it actually flew (``tick_path``)
         while integrating its own guidance + movement. We walk those segments
-        against the target's position (linearly interpolated between its begin-
-        and end-of-tick poses — the target is slow and gently turning), so the
-        miss distance reflects the real trajectory. The first geometric contact
-        is handed to ``ccd.on_hit`` with that miss distance (range-dependent Pk).
+        against the target's own recorded arc for this tick, so the miss distance
+        reflects two real trajectories rather than one real and one guessed. The
+        first geometric contact is handed to ``ccd.on_hit`` with that miss
+        distance (range-dependent Pk).
+
+        When the target records no usable path (a stub, or a platform that does
+        not sub-step), we fall back to a velocity-matched Hermite curve through
+        its begin- and end-of-tick poses. That fallback is why this used to be
+        wrong for the case that matters: it assumes a gently-turning target, and
+        a 5 g defensive break at 70 deg of bank departs from it by more than the
+        proximity fuze's lethal radius.
         """
         ccd = getattr(sim, "ccd", None)
+
+        missile_id = getattr(missile, "id", None)
+        engaged = getattr(ccd, "_engaged_once", None) if ccd is not None else None
+        logger = getattr(sim, "log_event", None)
+        if isinstance(engaged, set) and callable(logger) and missile_id not in engaged:
+            engaged.add(missile_id)
+            range_m = getattr(self, "_candidate_ranges_m", {}).get(
+                (missile_id, getattr(target, "id", None)), 0.0
+            )
+            logger(MissileEnteredTerminalRegionEvent(sim, missile, target, range_m))
+            logger(MissileEngagementEvent(sim, missile, target))
 
         # Arming gate: an unarmed fuze cannot detonate yet — the missile flies on.
         arm_time = getattr(missile, "arming_time_s", 0.0)
@@ -106,8 +166,18 @@ class Substepper:
             self._single_segment_fallback(sim, missile, target, tick_secs, calc)
             return
 
-        t_begin = self._begin_pose(ccd, target) or self._pose(target)
-        t_end = self._pose(target)
+        target_path = unit_tick_path(target, sim)
+        if target_path is None:
+            begin_state = ccd.get_begin_state(target) if ccd is not None else None
+            t_begin = self._begin_pose(ccd, target) or self._pose(target)
+            t_end = self._pose(target)
+            v_begin = self._pose_rate(target, begin_state)
+            v_end = self._pose_rate(target, None)
+
+        def target_pose(f: float):
+            if target_path is not None:
+                return pose_at_fraction(target_path, f)
+            return self._hermite_pose(t_begin, t_end, v_begin, v_end, tick_secs, f)
 
         n = len(path) - 1
         eff_radius = float(calc.params.fuse_radius_m + calc.params.target_radius_m)
@@ -123,8 +193,8 @@ class Substepper:
             f0 = i / n
             f1 = (i + 1) / n
             m0, m1 = path[i], path[i + 1]
-            t0 = self._lerp_pose(t_begin, t_end, f0)
-            t1 = self._lerp_pose(t_begin, t_end, f1)
+            t0 = target_pose(f0)
+            t1 = target_pose(f1)
             _is_hit, t_star, d_min = calc.check_segment_hit(m0, m1, t0, t1)
             if d_min < best_d:
                 best_d = d_min
@@ -140,11 +210,7 @@ class Substepper:
             f0 = best_i / n
             f1 = (best_i + 1) / n
             m_cpa = self._lerp_pose(path[best_i], path[best_i + 1], best_ts)
-            t_cpa = self._lerp_pose(
-                self._lerp_pose(t_begin, t_end, f0),
-                self._lerp_pose(t_begin, t_end, f1),
-                best_ts,
-            )
+            t_cpa = target_pose(tf)
             try:
                 now_s = float(getattr(sim, "elapsed_time_s", 0.0))
             except (TypeError, ValueError):
@@ -159,6 +225,31 @@ class Substepper:
             }
             if ccd is not None and hasattr(ccd, "on_hit"):
                 ccd.on_hit(missile, target, tf, sim, miss_distance_m=best_d)
+        elif passed_cpa and best_d > eff_radius:
+            # A guided air-to-air missile does not make a 180-degree turn and
+            # attack again after passing its target.  Resolve an outside-fuze
+            # closest approach as a terminal miss, so it cannot circle the
+            # aircraft indefinitely.  The path resolver has already checked the
+            # whole authoritative sub-stepped path for this tick, so no hit is
+            # discarded here.
+            tf = (best_i + best_ts) / n
+            try:
+                now_s = float(getattr(sim, "elapsed_time_s", 0.0))
+            except (TypeError, ValueError):
+                now_s = 0.0
+            missile._last_cpa_event = {
+                "time_s": now_s + tf * float(tick_secs),
+                "t_frac": tf,
+                "miss_m": best_d,
+                "missile_pose": self._lerp_pose(path[best_i], path[best_i + 1], best_ts),
+                "target_pose": target_pose(tf),
+                "target_id": getattr(target, "id", None),
+            }
+            missile.should_be_removed = True
+            missile.removal_reason = "terminal_miss"
+            record = getattr(sim, "record_diagnostic", None)
+            if callable(record):
+                record("missile_terminal_miss")
 
     def _single_segment_fallback(self, sim, missile, target, tick_secs: float, calc) -> None:
         """Coarse single-segment CCD over the tick when no sub-path is available."""
@@ -186,6 +277,41 @@ class Substepper:
     @staticmethod
     def _lerp_pose(a, b, f: float) -> tuple[float, float, float]:
         return (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f)
+
+    @staticmethod
+    def _pose_rate(unit, state) -> tuple[float, float, float]:
+        if state is not None:
+            speed = float(state.get("speed", 0.0))
+            yaw = float(state.get("yaw", 0.0))
+            pitch = float(state.get("pitch", 0.0))
+        else:
+            speed = float(getattr(unit, "speed", 0.0))
+            yaw = float(getattr(unit, "yaw_deg", 0.0))
+            pitch = float(getattr(unit, "pitch_deg", 0.0))
+        yaw_rad = math.radians(yaw)
+        pitch_rad = math.radians(pitch)
+        horizontal = speed * math.cos(pitch_rad)
+        east = horizontal * math.sin(yaw_rad)
+        north = horizontal * math.cos(yaw_rad)
+        up = speed * math.sin(pitch_rad)
+        latitude = float(getattr(getattr(unit, "position", None), "lat", 0.0))
+        return (
+            north / 111_320.0,
+            east / max(111_320.0 * math.cos(math.radians(latitude)), 1.0),
+            up,
+        )
+
+    @staticmethod
+    def _hermite_pose(p0, p1, rate0, rate1, duration_s: float, f: float):
+        f = max(0.0, min(1.0, float(f)))
+        h00 = 2.0 * f**3 - 3.0 * f**2 + 1.0
+        h10 = f**3 - 2.0 * f**2 + f
+        h01 = -2.0 * f**3 + 3.0 * f**2
+        h11 = f**3 - f**2
+        return tuple(
+            h00 * p0[i] + h10 * duration_s * rate0[i] + h01 * p1[i] + h11 * duration_s * rate1[i]
+            for i in range(3)
+        )
 
     @staticmethod
     def _pose(u) -> tuple[float, float, float]:
@@ -246,7 +372,14 @@ class Substepper:
                     bz = float(getattr(vb, "vz", vb[2]))
                     dv0, dv1, dv2 = (ax - bx), (ay - by), (az - bz)
                     return (dv0 * dv0 + dv1 * dv1 + dv2 * dv2) ** 0.5
-                except Exception:
+                except (
+                    AttributeError,
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                    IndexError,
+                    ZeroDivisionError,
+                ):
                     pass
         sa = float(getattr(a, "speed", 0.0) or 0.0)
         sb = float(getattr(b, "speed", 0.0) or 0.0)

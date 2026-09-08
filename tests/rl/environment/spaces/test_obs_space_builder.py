@@ -3,6 +3,15 @@ from types import SimpleNamespace
 import numpy as np
 
 from bvr_marl_core.rl.environment.spaces.obs_space_builder import ObservationBuilder
+from bvr_marl_core.rl.environment.spaces.observation.constants import (
+    FF_IDX_LOCK_KNOWN,
+    FF_IDX_LOCK_SLOT,
+    FM_IDX_TARGET_KNOWN,
+    FM_IDX_TARGET_SLOT,
+    d_FF,
+    d_FM,
+    d_OWN,
+)
 from bvr_marl_core.rl.environment.spaces.observation.friendly_info_builder import (
     FriendlyInfoBuilder,
 )
@@ -68,7 +77,7 @@ class DummySim:
 
 
 class DummyConfig:
-    own_dim = 21
+    own_dim = d_OWN
     fm_slots = 2
     ff_slots = 1
     em_slots = 2
@@ -84,10 +93,11 @@ def test_observation_builder_build():
     obs = builder.build("A1")
     assert isinstance(obs, dict)
     assert "own_state" in obs
+    assert obs["own_state"].shape == (d_OWN,)
 
-    # Updated: friendly missiles are now 8 dims per slot (was 6)
-    assert obs["friendly_missiles"].shape[0] == cfg.fm_slots * 8
-    assert obs["mask_friendly_missiles"].shape == (cfg.fm_slots,)
+    # Friendly missiles are self-contained tokens (mask folded into the last col).
+    assert obs["friendly_missiles"].shape[0] == cfg.fm_slots * d_FM
+    assert "mask_friendly_missiles" not in obs
 
 
 def test_friendly_target_indices_use_enemy_fighter_slots_for_sim_unit_ids():
@@ -96,6 +106,7 @@ def test_friendly_target_indices_use_enemy_fighter_slots_for_sim_unit_ids():
         ff_slots = 1
         ef_slots = 2
         all_agent_ids = ("A0", "B0", "B1")
+        information_mode = "oracle"
 
     def pos(lat=0.0, lon=0.0, alt=8_000.0):
         return SimpleNamespace(lat=lat, lon=lon, alt=alt)
@@ -151,45 +162,8 @@ def test_friendly_target_indices_use_enemy_fighter_slots_for_sim_unit_ids():
         target_provider=SimpleNamespace(current_target_id=202),
     )
 
-    # Track order mirrors EnemyInfoBuilder: sorted by track id, then filtered.
-    own.sensor = SimpleNamespace(
-        sensor_tracks=[
-            (
-                10,
-                np.zeros(6),
-                None,
-                red_1,
-                "AIRCRAFT",
-                own.position,
-                1.0,
-                1,
-                1.0,
-                1,
-                False,
-                False,
-                None,
-                None,
-                True,
-            ),
-            (
-                11,
-                np.zeros(6),
-                None,
-                red_2,
-                "AIRCRAFT",
-                own.position,
-                1.0,
-                1,
-                1.0,
-                1,
-                False,
-                False,
-                None,
-                None,
-                True,
-            ),
-        ]
-    )
+    # Oracle mode uses its explicitly privileged evaluator roster for this map.
+    own.sensor = SimpleNamespace(sensor_tracks=[])
     sim = SimpleNamespace(
         active_units={
             own.id: own,
@@ -200,7 +174,13 @@ def test_friendly_target_indices_use_enemy_fighter_slots_for_sim_unit_ids():
         }
     )
 
-    _, _, _, _, fm_targets, _, ff_locks, _ = FriendlyInfoBuilder(sim, Config()).build(own.id)
+    fm_tokens, ff_tokens = FriendlyInfoBuilder(sim, Config()).build(own.id)
 
-    assert fm_targets.tolist() == [1.0]
-    assert ff_locks.tolist() == [0.0]
+    # Relations fold into the token as (has_relation, slot_norm), slot_norm =
+    # slot / (ef_slots - 1). ef_slots=2 so slot 0 -> 0.0, slot 1 -> 1.0.
+    # The missile guides on enemy slot 1 (red_2 via target_provider);
+    # the wingman is locked on enemy slot 0 (red_1).
+    assert fm_tokens[0][FM_IDX_TARGET_KNOWN] == 1.0
+    assert fm_tokens[0][FM_IDX_TARGET_SLOT] == 1.0
+    assert ff_tokens[0][FF_IDX_LOCK_KNOWN] == 1.0
+    assert ff_tokens[0][FF_IDX_LOCK_SLOT] == 0.0

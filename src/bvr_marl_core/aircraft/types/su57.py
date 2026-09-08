@@ -3,6 +3,7 @@ from typing import Any
 
 from bvr_marl_core.aircraft.aircraft import Aircraft
 from bvr_marl_core.missiles.fox3.k77m import K77M
+from bvr_marl_core.simulator.core.helpers import Position
 
 
 class Su57(Aircraft):
@@ -21,6 +22,7 @@ class Su57(Aircraft):
         # --- Flight Physics / Geometry (SI units) ---
         # Empty mass (kg). Wiki lists empty ~18,500 kg.
         mass_kg: float = 18_500.0  # [Ref: Wikipedia Su-57 — empty weight]
+        fuel_capacity_kg: float = 6000.0  # internal fuel (empty = mass - fuel)
         # Wing reference area S (m²); Wikipedia: 78.8 m²
         reference_area_m2: float = 78.8  # [Ref: Wikipedia Su-57 — wing area]
         # Aspect ratio AR = b² / S with b = 14.1 m ⇒ AR ≈ 14.1² / 78.8 ≈ 2.52
@@ -46,9 +48,11 @@ class Su57(Aircraft):
             140.0  # Byelka has wide coverage with cheek arrays (sim nominal)
         )
         radar_vertical_fov_deg: float = 60.0
-        radar_max_range_m: float = (
-            300_000.0  # public estimates vary ~200–400 km vs fighter-size target
-        )
+        # N036's detailed performance is not public.  Use the commonly reported
+        # 400 km search-range ceiling as the hard instrumented-range gate; the
+        # radar equation still determines the shorter detection range for a
+        # target's actual RCS/aspect.
+        radar_max_range_m: float = 400_000.0
         radar_frequency_hz: float = 9.5e9  # X-band nominal center frequency
         radar_tx_power_w: float = 20e3  # plausible order-of-magnitude placeholder
         radar_antenna_gain_db: float = 38.0  # plausible AESA nose-array gain placeholder
@@ -59,6 +63,7 @@ class Su57(Aircraft):
         # --- RCS (very scenario/angle dependent; public numbers vary widely) ---
         # Use a conservative front-hemisphere placeholder for relative sim balancing.
         rcs: float = 0.1  # m^2 (note: highly uncertain; for sim use only)
+        irst_base_range_m: float = 45_000.0  # OLS-50 IRST
 
         # --- Passive / MWS / Stores (inherit reasonable defaults or tune as needed) ---
         passive_radar_angular_error_deg: float = 5.0
@@ -81,9 +86,28 @@ class Su57(Aircraft):
         internal_gun_effective_range_m: float = 800.0
         internal_gun_damage: float = 45.0
 
-    def __init__(self, name: str = "Su-57", config: "Su57.Config | None" = None, **kwargs):
-        cfg = config or Su57.Config()
-        super().__init__(name=name, config=cfg, **kwargs)
+    def __init__(
+        self,
+        position: Position,
+        yaw_deg: float,
+        speed_mps: float,
+        group: str,
+        map_limits: Any,
+        min_alt_m: float,
+        max_alt_m: float,
+    ):
+        cfg = self.Config()
+        cfg.min_alt_m = min_alt_m
+        cfg.max_alt_m = max_alt_m
+        super().__init__(
+            name="Su-57",
+            position=position,
+            yaw_deg=yaw_deg,
+            speed_mps=speed_mps,
+            group=group,
+            map_limits=map_limits,
+            config=cfg,
+        )
 
         # RCS pattern: LO, not as deep as F-22/35 in front aspect; stronger ventral sensitivity.
         # Aligned with public modeling papers and general LO expectations (orders of magnitude only).

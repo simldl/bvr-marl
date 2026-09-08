@@ -10,7 +10,15 @@ afterwards (emitting a removal event with a reason).
 
 from bvr_marl_core.aircraft.types.eurofighter import Eurofighter
 from bvr_marl_core.missiles.fox3.amraam import AIM120_AMRAAM
-from bvr_marl_core.simulator.core.events import UnitRemovedEvent
+from bvr_marl_core.simulator.core.events import (
+    AircraftDestroyedEvent,
+    AircraftMortallyHitEvent,
+    MissileDetonatedEvent,
+    MissileEngagementEvent,
+    MissileEnteredTerminalRegionEvent,
+    MissileFuzeTriggeredEvent,
+    UnitRemovedEvent,
+)
 from bvr_marl_core.simulator.core.helpers import Position
 from bvr_marl_core.simulator.simulator import Simulator
 from bvr_marl_core.simulator.utils.map_limits import MapLimits
@@ -63,10 +71,24 @@ def test_same_tick_removal_still_registers_hit():
 
     sim.do_tick()
 
-    # The proximity hit must be registered even though the missile also tripped a
-    # removal condition (lifetime) on the same tick.
-    assert tid not in sim.active_units, "target should be destroyed by the proximity hit"
+    # The proximity hit must register even though the missile also tripped a
+    # removal condition (lifetime) on the same tick. With the stochastic kill
+    # delay the target is flagged mortally hit now and removed at its scheduled
+    # death; advancing past the (<=10 s) cap must then destroy it.
+    assert target.is_mortally_hit is True, "the hit must register despite same-tick missile removal"
     assert mid not in sim.active_units, "missile is consumed on hit"
+    for event_type in (
+        MissileEnteredTerminalRegionEvent,
+        MissileEngagementEvent,
+        MissileFuzeTriggeredEvent,
+        MissileDetonatedEvent,
+        AircraftMortallyHitEvent,
+    ):
+        assert any(isinstance(event, event_type) for event in sim.events)
+    for _ in range(12):
+        sim.do_tick()
+    assert tid not in sim.active_units, "the mortally-hit target dies after the delay"
+    assert any(isinstance(event, AircraftDestroyedEvent) for event in sim.events)
 
 
 def test_energy_depleted_missile_removed_via_deferred_event():

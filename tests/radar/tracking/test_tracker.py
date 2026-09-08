@@ -1,11 +1,65 @@
 import numpy as np
+import pytest
 
 from bvr_marl_core.radar.tracking.tracker import TrackerManager
 from bvr_marl_core.simulator.core.helpers import Position
 
 
-def test_spawn_tracker_and_update():
+class _FixedTrack:
+    def __init__(self, state, covariance):
+        self._state = np.asarray(state, dtype=float)
+        self._covariance = np.asarray(covariance, dtype=float)
+
+    def get_state(self):
+        return self._state
+
+    def get_covariance(self):
+        return self._covariance
+
+
+def test_duplicate_merge_rejects_distant_pairs_before_matrix_solve(monkeypatch):
     tm = TrackerManager(assoc_dist=50.0)
+    reference = Position(0.0, 0.0, 0.0)
+    tm.tracks = {
+        1: _FixedTrack((0.0, 0.0, 0.0, 10.0, 0.0, 0.0), np.eye(6)),
+        2: _FixedTrack((10_000.0, 0.0, 0.0, 10.0, 0.0, 0.0), np.eye(6)),
+    }
+    tm.track_refs = {1: reference.copy(), 2: reference.copy()}
+    tm.track_meta = {1: {"updates_with_meas": 2}, 2: {"updates_with_meas": 2}}
+
+    def unexpected_solve(*_args, **_kwargs):
+        pytest.fail("A distant track pair should not require a matrix solve.")
+
+    monkeypatch.setattr(np.linalg, "solve", unexpected_solve)
+    monkeypatch.setattr(np.linalg, "pinv", unexpected_solve)
+
+    tm._merge_duplicate_tracks(reference)
+
+    assert set(tm.tracks) == {1, 2}
+
+
+def test_duplicate_merge_still_combines_overlapping_tracks():
+    tm = TrackerManager(assoc_dist=50.0)
+    reference = Position(0.0, 0.0, 0.0)
+    tm.tracks = {
+        1: _FixedTrack((0.0, 0.0, 0.0, 10.0, 0.0, 0.0), np.eye(6) * 100.0),
+        2: _FixedTrack((1.0, 0.0, 0.0, 10.0, 0.0, 0.0), np.eye(6) * 100.0),
+    }
+    tm.track_refs = {1: reference.copy(), 2: reference.copy()}
+    tm.track_meta = {
+        1: {"updates_with_meas": 3, "report_ids": (1,), "source_ids": (1,)},
+        2: {"updates_with_meas": 2, "report_ids": (2,), "source_ids": (2,)},
+    }
+
+    tm._merge_duplicate_tracks(reference)
+
+    assert set(tm.tracks) == {1}
+    assert tm.track_meta[1]["report_ids"] == (1, 2)
+
+
+@pytest.mark.parametrize("motion_model", ["cv", "imm_cv_ct"])
+def test_spawn_tracker_and_update(motion_model):
+    tm = TrackerManager(assoc_dist=50.0, motion_model=motion_model)
     meas = np.array([100.0, 200.0, 300.0])
     pos = Position(0, 0, 0)
     cluster = {"az": 0, "el": 0, "d": 1000, "T": None}
@@ -14,7 +68,13 @@ def test_spawn_tracker_and_update():
     tracker.predict(1.0)
     tracker.update(meas + 1.0)
     s = tracker.get_state()
-    assert s.shape[0] in (6, 8)
+    assert s.shape == (6,)
+    assert tracker.get_covariance().shape == (6, 6)
+
+
+def test_tracker_rejects_unknown_motion_model():
+    with pytest.raises(ValueError, match="motion_model"):
+        TrackerManager(assoc_dist=50.0, motion_model="unknown")
 
 
 def test_update_tracks_creates_and_associates():
@@ -26,6 +86,50 @@ def test_update_tracks_creates_and_associates():
     # Call again with same clusters, should associate not create more tracks
     out2 = tm.update_tracks(clusters, dt=1.0, default_ref=pos)
     assert len(out2) == 2
+
+
+def _anonymous_cluster(az, d, *, triangulated, range_denied, report_id):
+    return {
+        "az": az,
+        "el": 0.0,
+        "d": d,
+        "dop": 0.0,
+        "T": None,
+        "n_obs": 1,
+        "is_false_alarm": False,
+        "range_denied": range_denied,
+        "triangulated": triangulated,
+        "report_lineage": ((1, report_id),),
+        "source_ids": (1,),
+    }
+
+
+def test_bearing_only_triangulation_is_not_engageable_until_ranged():
+    from bvr_marl_core.domain.information import TrackLifecycle
+
+    tm = TrackerManager(assoc_dist=1000.0, confirmation_hits=1)
+    pos = Position(0, 0, 0)
+
+    # A triangulated bearing-only contact (e.g. two IRST bearings crossing) confirms
+    # but must NOT be engageable: two passive sensors watching several targets cross
+    # their bearings at spurious "ghost" points as well as real ones.
+    snaps = tm.update_tracks(
+        [_anonymous_cluster(0.0, 30_000.0, triangulated=True, range_denied=False, report_id=1)],
+        dt=1.0,
+        default_ref=pos,
+    )
+    assert len(snaps) == 1
+    assert snaps[0].lifecycle in {TrackLifecycle.CONFIRMED, TrackLifecycle.REACQUIRED}
+    assert snaps[0].engageable is False
+
+    # A genuinely ranged radar return on the same contact corroborates it -> engageable.
+    snaps = tm.update_tracks(
+        [_anonymous_cluster(0.0, 30_000.0, triangulated=False, range_denied=False, report_id=2)],
+        dt=1.0,
+        default_ref=pos,
+    )
+    assert len(snaps) == 1
+    assert snaps[0].engageable is True
 
 
 def make_cluster(az=0, el=0, d=1000, target=None, n_obs=1, is_false_alarm=False):
@@ -65,8 +169,7 @@ def test_tracker_follows_moving_target():
         dist = np.sqrt(true_east**2 + 1000.0**2)
         cl = [make_cluster(az=az, el=0, d=dist)]
         tracks = tm.update_tracks(cl, dt, pos)
-        tid, state, *_ = tracks[0]
-        track_pos = state[:3]
+        track_pos = tracks[0].state[:3]
         # "Wahrer Wert" ist das, was auch der Tracker als ENU sieht:
         true_xyz = to_cart(az, 0, dist)
         error = np.linalg.norm(track_pos - true_xyz)
@@ -88,8 +191,7 @@ def test_tracker_static_target():
     true_xyz = to_cart(az, el, dist)
     for i in range(10):
         tracks = tm.update_tracks(cl, 1.0, pos)
-        tid, state, *_ = tracks[0]
-        track_pos = state[:3]
+        track_pos = tracks[0].state[:3]
         error = np.linalg.norm(track_pos - true_xyz)
         assert error < 100.0, f"Static tracking not stable, error={error:.2f} m"
 
@@ -154,7 +256,7 @@ def test_confidence_v2_nis_ema_is_finite_and_non_negative():
 
 
 def test_confidence_in_track_output_is_in_unit_interval():
-    """The confidence value exported in each track output tuple must be in [0, 1]."""
+    """The confidence value exported in each snapshot must be in [0, 1]."""
     tm = TrackerManager(assoc_dist=200.0)
     pos = Position(0, 0, 1000)
     cl = [make_cluster(az=0, el=0, d=1000)]
@@ -163,8 +265,7 @@ def test_confidence_in_track_output_is_in_unit_interval():
         out = tm.update_tracks(cl, 1.0, pos)
 
     assert len(out) >= 1
-    # Track tuple: (tid, x6, P3x3, tgt, utype, ref, confidence, ...)
-    confidence = out[0][6]
+    confidence = out[0].confidence
     assert isinstance(confidence, float), f"confidence must be float, got {type(confidence)}"
     assert 0.0 <= confidence <= 1.0, f"confidence must be in [0,1], got {confidence}"
 
@@ -178,7 +279,7 @@ def test_confidence_drops_after_missed_updates():
     # Establish track
     for _ in range(8):
         out = tm.update_tracks(cl, 1.0, pos)
-    conf_established = out[0][6]
+    conf_established = out[0].confidence
 
     # Feed empty clusters (missed updates), staying below the 5-step prune threshold
     for _ in range(3):
@@ -187,7 +288,7 @@ def test_confidence_drops_after_missed_updates():
     if len(out) == 0:
         return  # Track pruned — recency penalty already zeroed confidence, test intent passed
 
-    conf_after_miss = out[0][6]
+    conf_after_miss = out[0].confidence
     assert conf_after_miss < conf_established, (
         f"Confidence should drop after missed updates: "
         f"before={conf_established:.3f}, after={conf_after_miss:.3f}"

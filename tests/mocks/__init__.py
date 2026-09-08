@@ -1,5 +1,5 @@
 # Mock module for aircraft testing
-from .aircraft import (
+from tests.mocks.aircraft import (
     MockAircraft,
     MockControl,
     MockCountermeasures,
@@ -13,7 +13,7 @@ from .aircraft import (
     MockVelocity,
     MockWeaponSystem,
 )
-from .missiles import (
+from tests.mocks.missiles import (
     MockAIM7,
     MockAIM9,
     MockAIM120,
@@ -23,7 +23,7 @@ from .missiles import (
     MockMissilePhysics,
     MockMissileRadar,
 )
-from .simulator import (
+from tests.mocks.simulator import (
     MockBenchmark,
     MockEnvironment,
     MockScenario,

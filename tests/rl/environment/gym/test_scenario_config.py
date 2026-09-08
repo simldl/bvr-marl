@@ -32,6 +32,7 @@ class TestAWACSConfigData:
         assert config.orbit_pattern == "figure8"
         assert config.orbit_leg_length_km == 40.0
         assert config.orbit_clockwise is True
+        assert config.trail_fighters is False
 
         # Lock FOV default
         assert config.lock_fov_deg == 60.0
@@ -47,6 +48,7 @@ class TestAWACSConfigData:
             orbit_pattern="figure8",
             orbit_leg_length_km=50.0,
             orbit_clockwise=False,
+            trail_fighters=True,
             lock_fov_deg=90.0,
         )
 
@@ -58,6 +60,7 @@ class TestAWACSConfigData:
         assert config.orbit_pattern == "figure8"
         assert config.orbit_leg_length_km == 50.0
         assert config.orbit_clockwise is False
+        assert config.trail_fighters is True
         assert config.lock_fov_deg == 90.0
 
 
@@ -133,6 +136,7 @@ class TestBVREnvConfigScenario:
         assert config.scenario_config.awacs_config.opponent_awacs is False
         assert config.scenario_config.awacs_config.orbit_distance_km == 100.0
         assert config.scenario_config.awacs_config.lock_fov_deg == 90.0
+        assert config.scenario_config.awacs_config.trail_fighters is False
 
     def test_from_dict_awacs_all_options(self):
         """Should parse all AWACS options."""
@@ -149,6 +153,7 @@ class TestBVREnvConfigScenario:
                     "orbit_pattern": "figure8",
                     "orbit_leg_length_km": 50.0,
                     "orbit_clockwise": False,
+                    "trail_fighters": True,
                     "lock_fov_deg": 150.0,
                 },
             },
@@ -164,6 +169,7 @@ class TestBVREnvConfigScenario:
         assert awacs.orbit_pattern == "figure8"
         assert awacs.orbit_leg_length_km == 50.0
         assert awacs.orbit_clockwise is False
+        assert awacs.trail_fighters is True
         assert awacs.lock_fov_deg == 150.0
 
     def test_from_dict_supports_rectangular_combat_zone(self):
@@ -208,6 +214,26 @@ class TestBVREnvConfigScenario:
 
         assert config.map_limits.right_lon == pytest.approx(200.0 / 111.0)
         assert config.full_map_limits.right_lon == pytest.approx(265.0 / 111.0)
+
+    def test_full_map_limits_expand_height_for_awacs_orbit_pattern(self):
+        config_dict = {
+            "num_agents_per_side": 2,
+            "map_width_km": 160,
+            "map_height_km": 60,
+            "scenario_config": {
+                "awacs_config": {
+                    "agent_awacs": True,
+                    "orbit_radius_km": 25.0,
+                    "orbit_distance_km": 80.0,
+                },
+            },
+        }
+
+        config = BVREnvConfig.from_dict(config_dict)
+
+        assert config.map_limits.top_lat == pytest.approx(30.0 / 111.0)
+        assert config.full_map_limits.top_lat == pytest.approx(50.0 / 111.0)
+        assert config.full_map_limits.right_lon == pytest.approx(105.0 / 111.0)
 
     def test_full_map_limits_do_not_expand_when_awacs_disabled(self):
         config_dict = {

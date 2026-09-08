@@ -27,6 +27,31 @@ def pad_generic(items, max_len, dim):
     return arr, mask
 
 
+def pad_tokens(items, max_len, feature_dim):
+    """Pad/truncate a list of feature vectors and fold the validity mask into a
+    trailing column, yielding self-contained entity tokens.
+
+    Each output row is ``[feature_0 ... feature_{feature_dim-1}, mask]`` where the
+    mask is 1.0 for a real entity and 0.0 for a padded slot. This lets the encoder
+    recover a per-entity padding mask (for attention) directly from the token,
+    instead of a separate parallel mask array.
+
+    Args:
+        items: List of length-``feature_dim`` feature vectors.
+        max_len: Number of slots to pad/truncate to.
+        feature_dim: Feature count per entity, excluding the mask column.
+
+    Returns:
+        Array of shape ``(max_len, feature_dim + 1)``; the last column is the mask.
+    """
+    n = min(len(items), max_len)
+    arr = np.zeros((max_len, feature_dim + 1), dtype=np.float32)
+    if n > 0:
+        arr[:n, :feature_dim] = np.array(items[:n], dtype=np.float32).reshape(n, feature_dim)
+        arr[:n, feature_dim] = 1.0
+    return arr
+
+
 def pad_indices(indices, max_len):
     """
     Pads/truncates a list of indices, returns mask.

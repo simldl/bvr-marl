@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from .base import VersionedModel  # SimulationConfig is a top-level document model
+from bvr_marl_core.schema.base import (
+    VersionedModel,  # SimulationConfig is a top-level document model
+)
 
 
 class SimulationConfig(VersionedModel):

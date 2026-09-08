@@ -17,26 +17,59 @@ def test_cv_kf_update_predict_cycle():
     assert np.allclose(state[:3], [1.1, 2.1, 3.1], atol=0.5)
 
 
+def test_cv_measurement_std_replaces_correlated_covariance():
+    kf = ConstantVelocityKFFilter(np.zeros(3), dt=1.0)
+    kf.set_measurement_covariance(
+        np.array(
+            [
+                [100.0, 80.0, 40.0],
+                [80.0, 100.0, 30.0],
+                [40.0, 30.0, 100.0],
+            ]
+        )
+    )
+
+    kf.set_measurement_std((2.0, 3.0, 4.0))
+
+    assert np.array_equal(kf.R, np.diag([4.0, 9.0, 16.0]))
+    kf.predict(1.0)
+    kf.update(np.ones(3))
+    assert np.linalg.eigvalsh(kf.get_covariance()).min() >= -1e-9
+
+
 def test_ct_kf_predict_update():
-    state = np.zeros(8)
-    kf = CoordinatedTurnKFFilter(state, np.eye(8), np.eye(8) * 0.1, np.eye(3) * 0.1, dt=1.0)
+    state = np.zeros(7)
+    kf = CoordinatedTurnKFFilter(state, np.eye(7), np.eye(7) * 0.1, np.eye(3) * 0.1, dt=1.0)
     kf.predict(1.0)
     kf.update(np.zeros(3))
     out = kf.get_state()
-    assert out.shape[0] in (6, 8)  # depends on internal state size
+    assert out.shape == (6,)
+
+
+def test_ct_horizontal_arc_matches_analytic_integral():
+    speed = 250.0
+    turn_rate = 0.05
+    dt = 2.0
+    state = np.array([0.0, 0.0, 1000.0, speed, 0.0, 10.0, turn_rate])
+    kf = CoordinatedTurnKFFilter(state, np.eye(7), np.zeros((7, 7)), np.eye(3), dt=dt)
+
+    predicted = kf._state_transition(state, dt)
+    assert predicted[0] == pytest.approx(speed * np.sin(turn_rate * dt) / turn_rate)
+    assert predicted[1] == pytest.approx(speed * (1.0 - np.cos(turn_rate * dt)) / turn_rate)
+    assert predicted[2] == pytest.approx(1020.0)
 
 
 def test_imm_blends_filters():
     meas = np.array([2.0, 0.0, -2.0])
     ct = CoordinatedTurnKFFilter(
-        np.hstack((meas, [0, 0, 0, 0, 0])), np.eye(8), np.eye(8) * 0.1, np.eye(3) * 0.1, dt=1.0
+        np.hstack((meas, [0, 0, 0, 0])), np.eye(7), np.eye(7) * 0.1, np.eye(3) * 0.1, dt=1.0
     )
     cv = ConstantVelocityKFFilter(meas, dt=1.0)
     imm = IMMFilter([ct, cv], np.array([[0.9, 0.1], [0.1, 0.9]]), [0.5, 0.5], np.eye(3) * 0.1)
     imm.predict(1.0)
     imm.update(meas + 0.1)
     s = imm.get_state()
-    assert s.shape[0] in (6, 8)
+    assert s.shape == (6,)
     probs = imm.mode_probabilities
     assert np.isclose(np.sum(probs), 1.0)
 
@@ -69,9 +102,9 @@ def test_ct_kf_accuracy_turn():
     dt = 1.0
     T = 10
     yaw = 0.0
-    pos = np.array([R * np.cos(yaw), R * np.sin(yaw), 0.0])
-    x0 = np.array([pos[0], pos[1], pos[2], V, yaw, 0, omega, 0])
-    kf = CoordinatedTurnKFFilter(x0, np.eye(8), np.eye(8) * 1e-3, np.eye(3) * 1e-2, dt=dt)
+    pos = np.array([R, 0.0, 0.0])
+    x0 = np.array([pos[0], pos[1], pos[2], 0.0, V, 0.0, omega])
+    kf = CoordinatedTurnKFFilter(x0, np.eye(7), np.eye(7) * 1e-3, np.eye(3) * 1e-2, dt=dt)
 
     print(
         f"{'step':>4} | {'true_x':>9} {'true_y':>9} {'true_vx':>9} {'true_vy':>9} | "
@@ -113,16 +146,13 @@ def test_imm_filter_accuracy_mix():
     dt = 1.0
     pos = np.zeros(3)
     vel = np.array([4.0, 0.0, 0.0])
-    # Circular arc parameters
-    R = 60.0
+    # Circular arc parameter
     omega = 0.08
-    V_circ = omega * R
-    yaw = 0.0
 
     ct = CoordinatedTurnKFFilter(
-        np.hstack((pos, [V_circ, yaw, 0, omega, 0])),
-        np.eye(8),
-        np.eye(8) * 1e-3,
+        np.hstack((pos, vel, 0.0)),
+        np.eye(7),
+        np.eye(7) * 1e-3,
         np.eye(3) * 1e-2,
         dt,
     )
@@ -134,8 +164,17 @@ def test_imm_filter_accuracy_mix():
             pos = pos + vel * dt
             meas = pos + np.random.normal(0, 0.15, 3)
         else:
-            yaw = yaw + omega * dt
-            pos = np.array([R * np.cos(yaw) + vel[0] * seg1_steps, R * np.sin(yaw), 0.0])
+            angle = omega * dt
+            a = np.sin(angle) / omega
+            b = (1.0 - np.cos(angle)) / omega
+            pos = pos + np.array([a * vel[0] - b * vel[1], b * vel[0] + a * vel[1], 0.0])
+            vel = np.array(
+                [
+                    np.cos(angle) * vel[0] - np.sin(angle) * vel[1],
+                    np.sin(angle) * vel[0] + np.cos(angle) * vel[1],
+                    0.0,
+                ]
+            )
             meas = pos + np.random.normal(0, 0.2, 3)
         imm.predict(dt)
         imm.update(meas)
@@ -179,9 +218,9 @@ def test_cv_filter_nis_zero_innovation():
 
 def test_ct_filter_nis_cached_after_update():
     """CT filter must cache NIS and expose it via get_last_update_stats()."""
-    state = np.zeros(8)
+    state = np.zeros(7)
     kf = CoordinatedTurnKFFilter(
-        state, np.eye(8) * 100.0, np.eye(8) * 0.1, np.eye(3) * 25.0, dt=1.0
+        state, np.eye(7) * 100.0, np.eye(7) * 0.1, np.eye(3) * 25.0, dt=1.0
     )
     kf.predict(1.0)
     kf.update(np.array([10.0, 0.0, 0.0]))
@@ -196,7 +235,7 @@ def test_ct_filter_nis_cached_after_update():
 def test_imm_filter_get_last_update_stats_delegates_to_dominant():
     """IMM get_last_update_stats() must return stats from the dominant mode."""
     meas = np.array([0.0, 0.0, 0.0])
-    ct = CoordinatedTurnKFFilter(np.zeros(8), np.eye(8), np.eye(8) * 0.1, np.eye(3) * 0.1, dt=1.0)
+    ct = CoordinatedTurnKFFilter(np.zeros(7), np.eye(7), np.eye(7) * 0.1, np.eye(3) * 0.1, dt=1.0)
     cv = ConstantVelocityKFFilter(meas, dt=1.0)
     # Start with CV strongly dominant (prob=[0.1, 0.9])
     imm = IMMFilter([ct, cv], np.array([[0.9, 0.1], [0.1, 0.9]]), [0.1, 0.9], np.eye(3) * 0.1)
@@ -207,3 +246,18 @@ def test_imm_filter_get_last_update_stats_delegates_to_dominant():
     assert "nis" in stats, "IMM must expose 'nis' from dominant subfilter"
     assert isinstance(stats["nis"], float)
     assert stats["nis"] >= 0.0
+
+
+def test_imm_log_likelihood_does_not_underflow_for_large_residuals():
+    near = ConstantVelocityKFFilter(np.array([1_000_000.0, 0.0, 0.0]), dt=1.0)
+    far = ConstantVelocityKFFilter(np.zeros(3), dt=1.0)
+    imm = IMMFilter(
+        [far, near],
+        np.eye(2),
+        [0.5, 0.5],
+        np.eye(3),
+    )
+
+    imm.update(np.array([1_000_000.0, 0.0, 0.0]))
+
+    assert imm.mode_probabilities[1] > 0.999

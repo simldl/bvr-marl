@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 from bvr_marl_core.physics.flying_objects import FlyingPhysics
 from bvr_marl_core.physics.physics import PhysicsParams, get_speed_of_sound
@@ -29,6 +28,10 @@ class MissilePhysics(FlyingPhysics):
         )
         stall0_mps: float = 129.0
         service_ceiling_m: float | None = None
+        # Per-missile multiplier on the (Mach-indexed) zero-lift drag. 1.0 keeps
+        # the shared baseline; > 1.0 makes a missile bleed energy faster after
+        # burnout, shortening its glide reach to match its real-world range.
+        drag_scale: float = 1.0
 
     def __init__(self, params: Params):
         super().__init__(params)
@@ -42,6 +45,7 @@ class MissilePhysics(FlyingPhysics):
         self.mach_t3 = params.mach_t3
         self.mach_t4 = params.mach_t4
         self.constant_engine_F = params.constant_engine_F
+        self.drag_scale = params.drag_scale
 
         # IMPORTANT: missiles keep legacy behavior (no aircraft energy protections)
         self.enable_energy_protections = False
@@ -55,19 +59,20 @@ class MissilePhysics(FlyingPhysics):
         mach = v_mps / get_speed_of_sound(alt_m)
         if mach < self.mach_t1:
             s = self.smoothstep(mach / self.mach_t1)
-            return self.cd0_s1 + (self.cd0_s2 - self.cd0_s1) * s
+            cd = self.cd0_s1 + (self.cd0_s2 - self.cd0_s1) * s
         elif mach < self.mach_t2:
             s = self.smoothstep((mach - self.mach_t1) / (self.mach_t2 - self.mach_t1))
-            return self.cd0_s2 - (self.cd0_s2 - self.cd0_s3) * s
+            cd = self.cd0_s2 - (self.cd0_s2 - self.cd0_s3) * s
         elif mach < self.mach_t3:
             s = self.smoothstep((mach - self.mach_t2) / (self.mach_t3 - self.mach_t2))
-            return self.cd0_s3 - (self.cd0_s3 - self.cd0_s4) * s
+            cd = self.cd0_s3 - (self.cd0_s3 - self.cd0_s4) * s
         elif mach < self.mach_t4:
             s = self.smoothstep((mach - self.mach_t3) / (self.mach_t4 - self.mach_t3))
-            return self.cd0_s4 - (self.cd0_s4 - self.cd0_hi) * s
+            cd = self.cd0_s4 - (self.cd0_s4 - self.cd0_hi) * s
         else:
             # Linear extrapolation beyond mach_t4, floored at half cd0_hi to prevent negative drag.
-            return max(self.cd0_hi * 0.5, self.cd0_hi - 0.01 * (mach - self.mach_t4))
+            cd = max(self.cd0_hi * 0.5, self.cd0_hi - 0.01 * (mach - self.mach_t4))
+        return cd * self.drag_scale
 
     def get_engine_force(self, v_mps: float, alt_m: float, throttle: float) -> float:
         return self.constant_engine_F

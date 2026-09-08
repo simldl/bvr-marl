@@ -12,11 +12,11 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from paper_style import paper_figure, save_paper_figure  # noqa: E402
+from paper_style import paper_figure, save_paper_figure
 
-from bvr_marl_core.aircraft.types.f22 import F22  # noqa: E402
-from bvr_marl_core.radar.core.lut import DetectionLUT  # noqa: E402
-from bvr_marl_core.simulator.core.helpers import Position  # noqa: E402
+from bvr_marl_core.aircraft.types.f22 import F22
+from bvr_marl_core.radar.core.lut import DetectionLUT
+from bvr_marl_core.simulator.core.helpers import Position
 
 _MAP_LIMITS = {"north": 100000, "south": -100000, "east": 100000, "west": -100000}
 
@@ -37,8 +37,10 @@ def _f22_radar_lut(max_rcs):
         freq_hz=cfg.get("radar_frequency_hz", 10e9),
         tx_power_w=cfg.get("radar_tx_power_w", 5e3),
         gain=10 ** (cfg.get("radar_antenna_gain_db", 34.0) / 10),
-        max_range_m=100_000.0,
+        max_range_m=200_000.0,
         snr_threshold_db=cfg.get("radar_snr_threshold_db", 10.0),
+        # Coherent-integration (processing) gain — match the real aircraft radar.
+        processing_gain_db=cfg.get("radar_processing_gain_db", 30.0),
         max_rcs=max_rcs,
         rcs_bins=256,
         dist_bins=256,
@@ -73,7 +75,7 @@ def _panel(ax, fig, lut, distances_km, rcs_values, rcs_marker, marker_label, mar
 def plot_f22_vs_f22():
     """F-22 radar vs F-22 target: full and zoomed RCS ranges."""
     lut = _f22_radar_lut(max_rcs=1.5)
-    distances_km = np.linspace(0, 100, 256)
+    distances_km = np.linspace(0, 200, 256)
     nominal = 0.0069
     fig, (ax_full, ax_zoom) = paper_figure(nrows=2, row_height_in=2.6)
     _panel(
@@ -104,7 +106,7 @@ def plot_f22_vs_f22():
 def plot_f22_vs_eurofighter():
     """F-22 radar vs Eurofighter target: full and zoomed RCS ranges."""
     lut = _f22_radar_lut(max_rcs=3.5)
-    distances_km = np.linspace(0, 100, 256)
+    distances_km = np.linspace(0, 200, 256)
     nominal = 3.0
     fig, (ax_full, ax_zoom) = paper_figure(nrows=2, row_height_in=2.6)
     _panel(

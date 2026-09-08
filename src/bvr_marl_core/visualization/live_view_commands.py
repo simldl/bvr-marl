@@ -52,7 +52,6 @@ def run_rl_commands_visualization(
     from bvr_marl_core.visualization.utils.path_utils import resolve_relative_path
     from bvr_marl_core.visualization.utils.rl_commands_visualizer import RLCommandsVisualizer
 
-    # Load config
     viz_config = load_viz_config(viz_config_path)
 
     # Use viz_config values if command-line arguments are not provided
@@ -79,7 +78,6 @@ def run_rl_commands_visualization(
     model_config_path = resolve_relative_path(model_config_path)
     train_config_path = resolve_relative_path(train_config_path)
 
-    # Get visualization settings
     viz_settings = viz_config.get("visualization", {})
     frames = viz_settings.get("frames", 100)
     interval = viz_settings.get("interval", 100)
@@ -89,7 +87,6 @@ def run_rl_commands_visualization(
     symbol_scale = viz_settings.get("symbol_scale", 2.0)
     show_text = viz_settings.get("show_text", True) if show_text is None else bool(show_text)
 
-    # Load train config
     train_config = load_train_config(train_config_path)
     env_config = train_config.get("env", {})
 

@@ -4,6 +4,12 @@ import numpy as np
 class BaseKFFilter:
     """Base interface for Kalman filter implementations."""
 
+    # Tracker bookkeeping: number of consecutive ticks this filter went without a
+    # measurement. The TrackerManager assigns it per-instance; the class-level
+    # default lets hot-path readers (prune, confidence, coast increment) use direct
+    # attribute access instead of getattr(kf, "missed_updates", 0.0) on every track.
+    missed_updates: float = 0.0
+
     def predict(self, dt: float):
         """Predict step of the filter."""
         ...
@@ -28,9 +34,14 @@ class BaseKFFilter:
         """Set state and optionally covariance."""
         ...
 
+    def set_measurement_covariance(self, covariance: np.ndarray):
+        """Set a full Cartesian position-measurement covariance."""
+        ...
+
+    def set_measurement_std(self, std_xyz: tuple[float, float, float]):
+        """Set diagonal position-measurement standard deviations."""
+        ...
+
     def get_last_update_stats(self) -> dict:
-        """Return stats from the most recent update step (e.g. NIS).
-        Subclasses should override this to expose innovation/NIS.
-        Returns an empty dict by default so callers must guard with .get('nis', fallback).
-        """
-        return {}
+        """Return NIS from the most recent update, if one has occurred."""
+        return {"nis": self._last_nis} if hasattr(self, "_last_nis") else {}

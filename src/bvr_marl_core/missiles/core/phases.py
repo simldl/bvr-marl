@@ -1,8 +1,11 @@
+from copy import deepcopy
+from typing import ClassVar
+
+
 class MissilePhaseManager:
-    DEFAULT_PHASES = {
+    DEFAULT_PHASES: ClassVar[dict[str, dict[str, float]]] = {
         "boost": {"duration_s": 20.0, "thrust_kN": 50.0},
         "middle": {"duration_s": 30.0, "thrust_kN": 45.0},
-        # 'terminal' is post-burn; thrust_kN is not used once terminal starts
         "terminal": {"duration_s": 50.0, "thrust_kN": 0.0},
     }
 
@@ -12,7 +15,7 @@ class MissilePhaseManager:
         if flight_phases is None:
             if motor_burn_s is None:
                 raise ValueError("motor_burn_s required for default phases.")
-            flight_phases = dict(self.DEFAULT_PHASES)
+            flight_phases = deepcopy(self.DEFAULT_PHASES)
             boost = float(flight_phases["boost"]["duration_s"])
             flight_phases["middle"]["duration_s"] = max(0.0, float(motor_burn_s) - boost)
 

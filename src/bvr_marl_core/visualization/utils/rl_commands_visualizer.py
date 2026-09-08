@@ -25,9 +25,7 @@ from bvr_marl_core.visualization.scenario_overlays import (
     select_display_limits,
 )
 from bvr_marl_core.visualization.scenplotter import (
-    PlotConfig,
     ScaleBar,
-    ScenarioPlotter,
     StatusMessage,
     TopLeftMessage,
 )

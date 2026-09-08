@@ -28,21 +28,32 @@ class TestKillProbability:
     """Test the range-dependent kill-probability model."""
 
     def test_flat_when_no_miss_distance(self):
-        """Without a miss distance, Pk is the flat hit_probability."""
+        """Without a miss distance, Pk is the flat warhead effectiveness.
+
+        The geometric CPA gate already resolves whether the missile intercepted, so
+        the legacy base ``hit_probability`` is no longer multiplied in after the fact;
+        with the neutral default ``warhead_effectiveness`` (1.0) a clean intercept is
+        fully lethal.
+        """
         m = SimpleNamespace(hit_probability=0.85, lethal_radius_m=100.0)
-        assert kill_probability(m, None) == pytest.approx(0.85)
+        assert kill_probability(m, None) == pytest.approx(1.0)
 
     def test_flat_when_lethal_radius_zero(self):
-        """lethal_radius_m <= 0 keeps the flat hit_probability (legacy)."""
+        """lethal_radius_m <= 0 keeps the flat warhead effectiveness (no fall-off)."""
         m = SimpleNamespace(hit_probability=0.85, lethal_radius_m=0.0)
-        assert kill_probability(m, 250.0) == pytest.approx(0.85)
+        assert kill_probability(m, 250.0) == pytest.approx(1.0)
 
     def test_gaussian_falloff_with_miss_distance(self):
-        """Pk falls off as exp(-(d/lethal_radius)^2) scaled by hit_probability."""
+        """Pk falls off as warhead_effectiveness * exp(-(d/lethal_radius)^2).
+
+        ``warhead_effectiveness`` defaults to 1.0 (the base hit_probability is not
+        re-applied after the geometric intercept), so a clean hit is fully lethal and
+        the miss-distance term alone drives the fall-off.
+        """
         m = SimpleNamespace(hit_probability=0.8, lethal_radius_m=100.0)
-        assert kill_probability(m, 0.0) == pytest.approx(0.8)
-        assert kill_probability(m, 100.0) == pytest.approx(0.8 * math.exp(-1.0))
-        assert kill_probability(m, 200.0) == pytest.approx(0.8 * math.exp(-4.0))
+        assert kill_probability(m, 0.0) == pytest.approx(1.0)
+        assert kill_probability(m, 100.0) == pytest.approx(math.exp(-1.0))
+        assert kill_probability(m, 200.0) == pytest.approx(math.exp(-4.0))
         # A large miss is essentially a clean miss.
         assert kill_probability(m, 400.0) < 0.01
 
@@ -62,6 +73,100 @@ class TestKillProbability:
         stochastic_on_hit(missile, target, 0.5, sim, miss_distance_m=300.0)
         assert 2 in active, "target should survive a far proximity miss"
         assert 1 not in active, "missile is always consumed on detonation"
+
+
+class TestTerminalEventLogging:
+    """A detonation emits exactly one structured MissileTerminalEvent whose
+    record captures launch context, CPA geometry, Pk, the kill draw, and the
+    kill result. Deterministic: rnd_gen is forced."""
+
+    def _make(self, roll: float):
+        from bvr_marl_core.simulator.core.helpers import Position
+
+        vel = SimpleNamespace(vx=300.0, vy=0.0, vz=0.0)
+        missile = SimpleNamespace(
+            id=10,
+            name="AIM120_AMRAAM",
+            hit_probability=0.9,
+            lethal_radius_m=100.0,
+            arming_time_s=1.5,
+            elapsed_time_s=20.0,
+            position=Position(0.0, 0.0, 8000.0),
+            velocity=vel,
+            source=SimpleNamespace(id=1),
+            radar=None,
+            target_provider=None,
+            _last_cpa_event={"time_s": 20.4, "t_frac": 0.4, "miss_m": 12.3},
+            _launch_context={"range_m": 40000.0, "zone": "R2", "aspect_deg": 15.0},
+        )
+        target = SimpleNamespace(
+            id=2,
+            is_destroyed=False,
+            position=Position(0.0, 0.36, 8000.0),
+            yaw_deg=180.0,
+            speed=250.0,
+            velocity=SimpleNamespace(vx=-250.0, vy=0.0, vz=0.0),
+        )
+        active = {10: missile, 2: target}
+        events: list = []
+        sim = SimpleNamespace(
+            active_units=active,
+            elapsed_time_s=20.4,
+            rnd_gen=SimpleNamespace(random=lambda: roll),
+            remove_unit=lambda uid: active.pop(uid, None),
+            log_event=events.append,
+        )
+        return missile, target, sim, events, active
+
+    def _terminal(self, events):
+        from bvr_marl_core.simulator.core.events import MissileTerminalEvent
+
+        return [e for e in events if isinstance(e, MissileTerminalEvent)]
+
+    def test_emits_single_record_with_expected_fields(self):
+        missile, target, sim, events, _ = self._make(roll=0.99)  # high roll -> no kill
+        stochastic_on_hit(missile, target, 0.4, sim, miss_distance_m=12.3)
+
+        terminal = self._terminal(events)
+        assert len(terminal) == 1
+        rec = terminal[0].record
+        assert rec["shooter_id"] == 1
+        assert rec["target_id"] == 2
+        assert rec["missile_type"] == "AIM120_AMRAAM"
+        assert rec["miss_distance_m"] == pytest.approx(12.3)
+        assert rec["cpa_miss_m"] == pytest.approx(12.3)
+        # Launch context is flat-merged under a launch_ prefix.
+        assert rec["launch_range_m"] == pytest.approx(40000.0)
+        assert rec["launch_zone"] == "R2"
+        # Closing along the LOS for a head-on pass = 300 + 250.
+        assert rec["closing_mps_at_cpa"] == pytest.approx(550.0)
+        assert rec["fuze_armed"] is True
+        # warhead_effectiveness defaults to 1.0 (base hit_probability not re-applied
+        # after the geometric intercept), so Pk is the miss-distance fall-off alone.
+        assert rec["pk"] == pytest.approx(math.exp(-((12.3 / 100.0) ** 2)))
+        assert rec["kill_roll"] == pytest.approx(0.99)
+        assert rec["killed"] is False
+
+    def test_record_kill_result_tracks_the_draw(self):
+        missile, target, sim, events, active = self._make(roll=0.01)  # low roll -> kill
+        stochastic_on_hit(missile, target, 0.4, sim, miss_distance_m=12.3)
+
+        rec = self._terminal(events)[0].record
+        assert rec["killed"] is True
+        # Stochastic time offset: a successful kill draw flags the target as
+        # mortally hit and schedules a delayed death rather than removing it now.
+        assert target.is_mortally_hit is True
+        assert 2 in active, "the mortally-hit target lingers until its scheduled death"
+        assert target._death_killer is missile
+
+    def test_logging_is_guarded_against_bad_launch_context(self):
+        """A malformed _launch_context must not break kill resolution; the
+        terminal event is still emitted and the missile still consumed."""
+        missile, target, sim, events, active = self._make(roll=0.5)
+        missile._launch_context = "not-a-dict"  # producer never sets this, but be safe
+        stochastic_on_hit(missile, target, 0.4, sim, miss_distance_m=12.3)
+        assert len(self._terminal(events)) == 1
+        assert 10 not in active, "missile is always consumed on detonation"
 
 
 class TestCCDConfig:
@@ -697,6 +802,25 @@ class TestMissileCCDManagerPostUpdateCCD:
         sim.log_event.assert_not_called()
 
     @patch("bvr_marl_core.simulator.core.hit_event_helpers.units_distance_km")
+    def test_operational_missile_missing_evaluator_target_fails_closed(self, mock_distance):
+        manager = MissileCCDManager()
+        manager.target_selector = Mock(return_value=MockUnit(unit_id=1))
+        missile = MockUnit(unit_id=10, is_missile=True)
+        missile.weapon_track = object()
+        diagnostics = []
+        sim = SimpleNamespace(
+            _weapon_truth_associations={},
+            evaluator_target_for_weapon=lambda _missile: None,
+            record_diagnostic=diagnostics.append,
+        )
+
+        manager.post_update_ccd([missile], 1.0, sim)
+
+        manager.target_selector.assert_not_called()
+        assert diagnostics == ["missing_evaluator_target"]
+        mock_distance.assert_not_called()
+
+    @patch("bvr_marl_core.simulator.core.hit_event_helpers.units_distance_km")
     def test_missile_with_destroyed_target(self, mock_distance):
         """Test missile with destroyed target."""
         manager = MissileCCDManager()
@@ -773,7 +897,8 @@ class TestMissileCCDManagerPostUpdateCCD:
 
                 # Should log engagement event
                 mock_event.assert_called_once_with(sim, missile, target)
-                sim.log_event.assert_called_once_with("engagement_event")
+                assert sim.log_event.call_count == 2
+                assert sim.log_event.call_args_list[-1].args == ("engagement_event",)
 
                 # Should track that this missile has engaged
                 assert 1 in manager._engaged_once
@@ -1020,7 +1145,7 @@ class TestMissileCCDManagerIntegration:
             manager.post_update_ccd([missile, target], 1.0, sim)
 
             # Should log engagement
-            assert sim.log_event.call_count == 1
+            assert sim.log_event.call_count == 2
             assert 1 in manager._engaged_once
 
         # Reset sim mock for second call
@@ -1060,8 +1185,8 @@ class TestMissileCCDManagerIntegration:
             assert mock_hit_check.call_count == 2
             # Should hit with first missile
             manager.on_hit.assert_called_once_with(missile1, target, 0.3, sim)
-            # Should log two engagement events
-            assert sim.log_event.call_count == 2
+            # Each missile emits terminal-region entry plus compatibility engagement.
+            assert sim.log_event.call_count == 4
 
     def test_state_capture_and_restore_integration(self):
         """Test integration of state capture and restore functionality."""

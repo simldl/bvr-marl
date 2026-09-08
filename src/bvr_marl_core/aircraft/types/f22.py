@@ -15,6 +15,7 @@ class F22(Aircraft):
 
         # Physics (geometry corrected)
         mass_kg: float = 19700.0  # empty mass (USAF)  :contentReference[oaicite:7]{index=7}
+        fuel_capacity_kg: float = 6000.0  # internal fuel (empty = mass - fuel)
         reference_area_m2: float = 78.0  # ~840 ft^2  :contentReference[oaicite:8]{index=8}
         aspect_ratio: float = 2.36  # b^2/S = 13.56^2 / 78.04  :contentReference[oaicite:9]{index=9}
         oswald_e: float = 0.82

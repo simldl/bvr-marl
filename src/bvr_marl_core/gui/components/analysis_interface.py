@@ -9,20 +9,19 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 import streamlit as st
-import yaml
 
-from bvr_marl_core.services import tensorboard as tb_service
+from bvr_marl_core.gui.components.output_paths import (
+    display_compact_output_paths,
+    display_recent_outputs,
+)
 from bvr_marl_core.utils.paths import core_runtime_root as runtime_root
 from bvr_marl_core.utils.paths import exported_plots_root, models_root, sibling_model_roots
-
-from .output_paths import display_compact_output_paths, display_recent_outputs
 
 # Root directory where Ray Tune saves checkpoints/logs — resolved via
 # models_root() so it works from any working directory.
@@ -43,7 +42,7 @@ def _load_campaign_paths() -> list[dict]:
         f = _campaign_paths_file()
         if f.exists():
             return json.loads(f.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         pass
     return []
 
@@ -54,7 +53,7 @@ def _save_campaign_paths(paths: list[dict]) -> None:
         f = _campaign_paths_file()
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps(paths, indent=2), encoding="utf-8")
-    except Exception:
+    except (OSError, TypeError, ValueError):
         pass
 
 
@@ -151,7 +150,7 @@ class TensorboardProcessMonitor:
         try:
             with open(_tensorboard_processes_file(), "w") as f:
                 json.dump([p.to_dict() for p in self.processes], f, indent=2)
-        except Exception:
+        except (OSError, TypeError, ValueError):
             pass
 
     def register(self, proc: TensorboardProcess):
@@ -187,7 +186,7 @@ class TensorboardProcessMonitor:
                 for child in parent.children(recursive=True):
                     child.kill()
                 parent.kill()
-        except Exception:
+        except Exception:  # noqa: BLE001 - psutil is imported inside this try, so psutil.Error cannot be named here; killing an already-dead process tree is expected.
             pass
         for p in self.processes:
             if p.pid == pid:
@@ -280,7 +279,7 @@ def find_campaigns(models_root: Path | None = None) -> dict[str, dict]:
                     campaigns[campaign_id]["runs"].append(
                         {"name": model_dir.name, "path": str(model_dir)}
                     )
-                except Exception:
+                except (OSError, AttributeError, TypeError, ValueError, KeyError, IndexError):
                     continue
                 continue
 
@@ -435,372 +434,478 @@ def analysis_interface():
     )
 
     with tab1:
-        st.subheader("TensorBoard Launch")
+        _render_tensorboard_tab(monitor)
 
-        model_runs = find_model_runs()
-        models_root_str = str(MODELS_ROOT)
+    with tab2:
+        _render_export_plots_tab()
 
-        # Settings in a compact row
-        col_port, col_host, _ = st.columns([1, 1, 2])
-        with col_port:
-            port = st.number_input(
-                "Port", value=6006, min_value=1024, max_value=65535, key="tb_port"
+    with tab3:
+        _render_run_comparison_tab(monitor)
+
+    with tab4:
+        _render_model_evaluation_tab()
+
+    _render_analysis_output_info()
+
+
+def _render_tensorboard_tab(monitor: TensorboardProcessMonitor) -> None:
+    st.subheader("TensorBoard Launch")
+
+    model_runs = find_model_runs()
+    models_root_str = str(MODELS_ROOT)
+    port, host = _render_tensorboard_settings()
+
+    st.markdown("---")
+    _render_launch_all_models(model_runs, models_root_str, port, host, monitor)
+
+    st.markdown("---")
+    _render_launch_selected_models(model_runs, models_root_str, port, host, monitor)
+
+    st.markdown("---")
+    _render_custom_tensorboard_launcher(models_root_str, port, host, monitor)
+
+    st.markdown("---")
+    st.markdown("#### Process History")
+    monitor.render_all()
+
+
+def _render_tensorboard_settings() -> tuple[int, str]:
+    col_port, col_host, _ = st.columns([1, 1, 2])
+    with col_port:
+        port = st.number_input("Port", value=6006, min_value=1024, max_value=65535, key="tb_port")
+    with col_host:
+        host = st.text_input("Host", value="localhost", key="tb_host")
+    return int(port), host
+
+
+def _render_launch_all_models(
+    model_runs: list[dict],
+    models_root_str: str,
+    port: int,
+    host: str,
+    monitor: TensorboardProcessMonitor,
+) -> None:
+    st.markdown("#### Launch All Models")
+    col_all, col_all_info = st.columns([1, 3])
+    with col_all:
+        all_disabled = not _models_root_has_events()
+        if st.button(
+            "Launch All",
+            type="primary",
+            width="stretch",
+            disabled=all_disabled,
+            key="tb_launch_all",
+        ):
+            _launch_tensorboard(
+                logdir=models_root_str,
+                port=port,
+                host=host,
+                label=f"All models ({models_root_str})",
+                monitor=monitor,
             )
-        with col_host:
-            host = st.text_input("Host", value="localhost", key="tb_host")
+            st.rerun()
+    with col_all_info:
+        if all_disabled:
+            st.warning(f"No TensorBoard event files found in `{models_root_str}`")
+        else:
+            num = len([run for run in model_runs if run["has_events"]])
+            st.info(
+                f"Points TensorBoard at `{models_root_str}` and covers all {num} model(s) with logs."
+            )
 
-        st.markdown("---")
 
-        # --- Launch All ---
-        st.markdown("#### Launch All Models")
-        col_all, col_all_info = st.columns([1, 3])
-        with col_all:
-            all_disabled = not _models_root_has_events()
-            if st.button(
-                "Launch All",
-                type="primary",
-                width="stretch",
-                disabled=all_disabled,
-                key="tb_launch_all",
-            ):
+def _render_launch_selected_models(
+    model_runs: list[dict],
+    models_root_str: str,
+    port: int,
+    host: str,
+    monitor: TensorboardProcessMonitor,
+) -> None:
+    st.markdown("#### Launch Specific Model(s)")
+
+    available = [run for run in model_runs if run["has_events"]]
+    all_names = [run["name"] for run in available]
+
+    if not available:
+        st.warning(f"No models with TensorBoard event files found in `{models_root_str}`")
+        if not MODELS_ROOT.exists():
+            st.caption(f"Directory `{models_root_str}` does not exist yet — train a model first.")
+        return
+
+    selected_names = st.multiselect(
+        "Select model(s):",
+        options=all_names,
+        help="Select one or more models. Single selection uses a dedicated logdir; multiple selections launch a combined TensorBoard view.",
+    )
+
+    col_sel, col_sel_info = st.columns([1, 3])
+    with col_sel:
+        if st.button(
+            "Launch Selected",
+            width="stretch",
+            disabled=not selected_names,
+            key="tb_launch_sel",
+        ):
+            _launch_selected_tensorboard_runs(selected_names, available, port, host, monitor)
+            st.rerun()
+    with col_sel_info:
+        if selected_names:
+            st.info(f"Selected: {', '.join(selected_names)}")
+
+    _render_available_model_table(model_runs)
+
+
+def _launch_selected_tensorboard_runs(
+    selected_names: list[str],
+    available: list[dict],
+    port: int,
+    host: str,
+    monitor: TensorboardProcessMonitor,
+) -> None:
+    if len(selected_names) == 1:
+        run = next(run for run in available if run["name"] == selected_names[0])
+        _launch_tensorboard(
+            logdir=run["path"],
+            port=port,
+            host=host,
+            label=selected_names[0],
+            monitor=monitor,
+        )
+        return
+
+    selected_paths = [run["path"] for run in available if run["name"] in selected_names]
+    logdir_arg = ",".join(f"{name}:{path}" for name, path in zip(selected_names, selected_paths))
+    _launch_tensorboard(
+        logdir=logdir_arg,
+        port=port,
+        host=host,
+        label=f"{len(selected_names)} models: {', '.join(selected_names)}",
+        monitor=monitor,
+    )
+
+
+def _render_available_model_table(model_runs: list[dict]) -> None:
+    st.markdown("#### Available Models")
+    rows = [
+        {
+            "Model": run["name"],
+            "TB Logs": "Available" if run["has_events"] else "Not found",
+            "Event files": run["num_events"] if run["has_events"] else 0,
+            "Path": run["path"],
+        }
+        for run in model_runs
+    ]
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+
+def _render_custom_tensorboard_launcher(
+    models_root_str: str,
+    port: int,
+    host: str,
+    monitor: TensorboardProcessMonitor,
+) -> None:
+    st.markdown("#### Custom Log Directory")
+    col_custom, col_custom_btn = st.columns([3, 1])
+    with col_custom:
+        custom_logdir = st.text_input(
+            "Path:",
+            value=models_root_str,
+            placeholder="models",
+            key="tb_custom_logdir",
+        )
+    with col_custom_btn:
+        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+        if st.button("Launch", width="stretch", key="tb_launch_custom"):
+            if Path(custom_logdir).exists():
                 _launch_tensorboard(
-                    logdir=models_root_str,
+                    logdir=custom_logdir,
                     port=port,
                     host=host,
-                    label=f"All models ({models_root_str})",
+                    label=f"custom: {custom_logdir}",
                     monitor=monitor,
                 )
                 st.rerun()
-        with col_all_info:
-            if all_disabled:
-                st.warning(f"No TensorBoard event files found in `{models_root_str}`")
             else:
-                num = len([r for r in model_runs if r["has_events"]])
-                st.info(
-                    f"Points TensorBoard at `{models_root_str}` and covers all {num} model(s) with logs."
-                )
+                st.error(f"Path does not exist: {custom_logdir}")
 
-        st.markdown("---")
 
-        # --- Select specific models ---
-        st.markdown("#### Launch Specific Model(s)")
+def _render_export_plots_tab() -> None:
+    st.subheader("Export Training Plots")
+    st.info(
+        "Select runs to compare on the same plots. "
+        "Exports: mean return, kills, deaths, missiles fired, win rate."
+    )
 
-        available = [r for r in model_runs if r["has_events"]]
-        all_names = [r["name"] for r in available]
+    _ensure_export_session_state()
+    model_runs = find_model_runs()
+    available = [run for run in model_runs if run["has_events"]]
+    campaigns = find_campaigns()
+    _ensure_latest_campaign_path_seeded(campaigns)
 
-        if not available:
-            st.warning(f"No models with TensorBoard event files found in `{models_root_str}`")
-            if not MODELS_ROOT.exists():
-                st.caption(
-                    f"Directory `{models_root_str}` does not exist yet — train a model first."
-                )
-        else:
-            selected_names = st.multiselect(
-                "Select model(s):",
-                options=all_names,
-                help="Select one or more models. Single selection uses a dedicated logdir; multiple selections launch a combined TensorBoard view.",
-            )
+    col_setup, col_actions = st.columns([2, 1])
+    with col_setup:
+        _render_export_campaign_selector(campaigns)
+        selected_exports = _render_export_run_selector(available)
+        _render_export_custom_paths()
+        output_dir, smoothing = _render_export_settings()
 
-            col_sel, col_sel_info = st.columns([1, 3])
-            with col_sel:
-                sel_disabled = not selected_names
-                if st.button(
-                    "Launch Selected",
-                    width="stretch",
-                    disabled=sel_disabled,
-                    key="tb_launch_sel",
-                ):
-                    if len(selected_names) == 1:
-                        run = next(r for r in available if r["name"] == selected_names[0])
-                        _launch_tensorboard(
-                            logdir=run["path"],
-                            port=port,
-                            host=host,
-                            label=selected_names[0],
-                            monitor=monitor,
-                        )
-                    else:
-                        # Pass the parent dir — TensorBoard will show each sub-run as a separate experiment
-                        # We create a temporary multi-logdir argument using name:path syntax via the script
-                        # Simplest approach: point at models root and note which are selected
-                        selected_paths = [
-                            r["path"] for r in available if r["name"] in selected_names
-                        ]
-                        logdir_arg = ",".join(
-                            f"{n}:{p}" for n, p in zip(selected_names, selected_paths)
-                        )
-                        _launch_tensorboard(
-                            logdir=logdir_arg,
-                            port=port,
-                            host=host,
-                            label=f"{len(selected_names)} models: {', '.join(selected_names)}",
-                            monitor=monitor,
-                        )
-                    st.rerun()
-            with col_sel_info:
-                if selected_names:
-                    st.info(f"Selected: {', '.join(selected_names)}")
+    with col_actions:
+        run_dirs = _build_export_run_dirs(selected_exports, available)
+        _render_export_actions(run_dirs, output_dir, smoothing)
 
-            # Table of available models
-            st.markdown("#### Available Models")
-            rows = []
-            for r in model_runs:
-                rows.append(
-                    {
-                        "Model": r["name"],
-                        "TB Logs": "Available" if r["has_events"] else "Not found",
-                        "Event files": r["num_events"] if r["has_events"] else 0,
-                        "Path": r["path"],
-                    }
-                )
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-        st.markdown("---")
+def _ensure_export_session_state() -> None:
+    if "export_custom_paths" not in st.session_state:
+        st.session_state.export_custom_paths = _load_campaign_paths()
+    if "export_campaign_runs" not in st.session_state:
+        st.session_state.export_campaign_runs = []
 
-        # --- Custom path ---
-        st.markdown("#### Custom Log Directory")
-        col_custom, col_custom_btn = st.columns([3, 1])
-        with col_custom:
-            custom_logdir = st.text_input(
-                "Path:",
-                value=models_root_str,
-                placeholder="models",
-                key="tb_custom_logdir",
-            )
-        with col_custom_btn:
-            st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-            if st.button("Launch", width="stretch", key="tb_launch_custom"):
-                if Path(custom_logdir).exists():
-                    _launch_tensorboard(
-                        logdir=custom_logdir,
-                        port=port,
-                        host=host,
-                        label=f"custom: {custom_logdir}",
-                        monitor=monitor,
-                    )
-                    st.rerun()
-                else:
-                    st.error(f"Path does not exist: {custom_logdir}")
 
-        st.markdown("---")
-        st.markdown("#### Process History")
-        monitor.render_all()
+def _render_export_campaign_selector(campaigns: dict[str, dict]) -> None:
+    if not campaigns:
+        return
 
-    with tab2:
-        st.subheader("Export Training Plots")
-        st.info(
-            "Select runs to compare on the same plots. "
-            "Exports: mean return, kills, deaths, missiles fired, win rate."
+    campaign_options = {
+        f"{campaign['name']}  ({len(campaign['runs'])} models)": cid
+        for cid, campaign in sorted(campaigns.items(), key=lambda item: item[1]["name"])
+    }
+    with st.expander("Select by campaign", expanded=bool(st.session_state.export_campaign_runs)):
+        chosen_label = st.selectbox(
+            "Campaign:",
+            options=[""] + list(campaign_options.keys()),
+            format_func=lambda label: "— choose a campaign —" if label == "" else label,
+            key="ep_campaign_select",
         )
-
-        if "export_custom_paths" not in st.session_state:
-            st.session_state.export_custom_paths = _load_campaign_paths()
-        if "export_campaign_runs" not in st.session_state:
-            st.session_state.export_campaign_runs = []  # run names pre-selected via campaign
-
-        model_runs = find_model_runs()
-        available = [r for r in model_runs if r["has_events"]]
-        available_names = [r["name"] for r in available]
-        campaigns = find_campaigns()
-        _ensure_latest_campaign_path_seeded(campaigns)
-
-        selected_exports: list[str] = []
-
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            # ── campaign selector ──────────────────────────────────────────
-            if campaigns:
-                campaign_options = {
-                    f"{v['name']}  ({len(v['runs'])} models)": k
-                    for k, v in sorted(campaigns.items(), key=lambda x: x[1]["name"])
-                }
-                with st.expander(
-                    "Select by campaign", expanded=bool(st.session_state.export_campaign_runs)
-                ):
-                    chosen_label = st.selectbox(
-                        "Campaign:",
-                        options=[""] + list(campaign_options.keys()),
-                        format_func=lambda x: "— choose a campaign —" if x == "" else x,
-                        key="ep_campaign_select",
-                    )
-                    if chosen_label:
-                        cid = campaign_options[chosen_label]
-                        runs_in_campaign = campaigns[cid]["runs"]
-                        run_names_in_campaign = [r["name"] for r in runs_in_campaign]
-                        st.caption(
-                            f"{len(runs_in_campaign)} model(s): {', '.join((n[:19] + '…') if len(n) > 20 else n for n in run_names_in_campaign)}"
-                        )
-                        if st.button("Load all models from this campaign", key="ep_load_campaign"):
-                            st.session_state.export_campaign_runs = run_names_in_campaign
-                            st.rerun()
-                    if st.session_state.export_campaign_runs:
-                        if st.button("Clear campaign selection", key="ep_clear_campaign"):
-                            st.session_state.export_campaign_runs = []
-                            st.rerun()
-
-            # ── runs from models/ ──────────────────────────────────────────
-            if available:
-                # Seed the multiselect with any campaign-loaded runs (filter to valid names)
-                default_selection = [
-                    n for n in st.session_state.export_campaign_runs if n in available_names
-                ]
-                selected_exports = st.multiselect(
-                    "Training run(s):",
-                    options=available_names,
-                    default=default_selection,
-                    help="Select one or more runs to compare on the same plots. Use the campaign selector above to bulk-load a campaign.",
-                )
-            else:
-                st.warning(f"No models with TensorBoard logs found in `{models_root_str}`")
-
-            # ── custom / campaign paths ────────────────────────────────────
-            with st.expander(
-                "Add custom / campaign paths", expanded=bool(st.session_state.export_custom_paths)
-            ):
-                add_col1, add_col2, add_col3 = st.columns([2, 4, 1])
-                with add_col1:
-                    new_label = st.text_input("Label", key="ep_new_label", placeholder="my_run")
-                with add_col2:
-                    new_path = st.text_input(
-                        "Path", key="ep_new_path", placeholder="C:/path/to/logs"
-                    )
-                with add_col3:
-                    st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-                    if st.button("Add", key="ep_add_path", width="stretch"):
-                        label = new_label.strip() or Path(new_path.strip()).name
-                        path = new_path.strip()
-                        if path and Path(path).exists():
-                            st.session_state.export_custom_paths.append(
-                                {"label": label, "path": path}
-                            )
-                            _save_campaign_paths(st.session_state.export_custom_paths)
-                            st.rerun()
-                        elif path:
-                            st.error(f"Path does not exist: {path}")
-                        else:
-                            st.error("Enter a path")
-
-                if st.session_state.export_custom_paths:
-                    st.markdown("**Added paths:**")
-                    for idx, entry in enumerate(list(st.session_state.export_custom_paths)):
-                        c1, c2, c3 = st.columns([2, 4, 1])
-                        with c1:
-                            st.markdown(f"`{entry['label']}`")
-                        with c2:
-                            st.caption(entry["path"])
-                        with c3:
-                            if st.button("Remove", key=f"ep_rm_{idx}", width="stretch"):
-                                st.session_state.export_custom_paths.pop(idx)
-                                _save_campaign_paths(st.session_state.export_custom_paths)
-                                st.rerun()
-
-            output_dir = st.text_input("Output directory:", value=str(exported_plots_root()))
-            smoothing = st.slider(
-                "Smoothing:", 0.0, 0.99, 0.9, help="Exponential smoothing (0=none, 0.99=heavy)"
+        if chosen_label:
+            cid = campaign_options[chosen_label]
+            run_names_in_campaign = [run["name"] for run in campaigns[cid]["runs"]]
+            st.caption(
+                f"{len(run_names_in_campaign)} model(s): "
+                f"{', '.join(_short_run_name(name) for name in run_names_in_campaign)}"
             )
+            if st.button("Load all models from this campaign", key="ep_load_campaign"):
+                st.session_state.export_campaign_runs = run_names_in_campaign
+                st.rerun()
+        if st.session_state.export_campaign_runs:
+            if st.button("Clear campaign selection", key="ep_clear_campaign"):
+                st.session_state.export_campaign_runs = []
+                st.rerun()
 
-        with col2:
-            st.markdown("#### Export Actions")
-            # Build the full run_dirs dict: models/ selections + custom paths
-            run_dirs: dict[str, str] = {}
-            for name in selected_exports:
-                run = next(r for r in available if r["name"] == name)
-                run_dirs[name] = run["path"]
-            for entry in st.session_state.export_custom_paths:
-                run_dirs[entry["label"]] = entry["path"]
 
-            export_ready = bool(run_dirs)
+def _short_run_name(name: str) -> str:
+    return f"{name[:19]}…" if len(name) > 20 else name
+
+
+def _render_export_run_selector(available: list[dict]) -> list[str]:
+    available_names = [run["name"] for run in available]
+    if not available:
+        st.warning(f"No models with TensorBoard logs found in `{MODELS_ROOT}`")
+        return []
+
+    default_selection = [
+        name for name in st.session_state.export_campaign_runs if name in available_names
+    ]
+    return st.multiselect(
+        "Training run(s):",
+        options=available_names,
+        default=default_selection,
+        help="Select one or more runs to compare on the same plots. Use the campaign selector above to bulk-load a campaign.",
+    )
+
+
+def _render_export_custom_paths() -> None:
+    with st.expander(
+        "Add custom / campaign paths", expanded=bool(st.session_state.export_custom_paths)
+    ):
+        add_col1, add_col2, add_col3 = st.columns([2, 4, 1])
+        with add_col1:
+            new_label = st.text_input("Label", key="ep_new_label", placeholder="my_run")
+        with add_col2:
+            new_path = st.text_input("Path", key="ep_new_path", placeholder="C:/path/to/logs")
+        with add_col3:
+            st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+            if st.button("Add", key="ep_add_path", width="stretch"):
+                _add_export_custom_path(new_label, new_path)
+
+        _render_export_custom_path_list()
+
+
+def _add_export_custom_path(new_label: str, new_path: str) -> None:
+    label = new_label.strip() or Path(new_path.strip()).name
+    path = new_path.strip()
+    if path and Path(path).exists():
+        st.session_state.export_custom_paths.append({"label": label, "path": path})
+        _save_campaign_paths(st.session_state.export_custom_paths)
+        st.rerun()
+    elif path:
+        st.error(f"Path does not exist: {path}")
+    else:
+        st.error("Enter a path")
+
+
+def _render_export_custom_path_list() -> None:
+    if not st.session_state.export_custom_paths:
+        return
+
+    st.markdown("**Added paths:**")
+    for idx, entry in enumerate(list(st.session_state.export_custom_paths)):
+        c1, c2, c3 = st.columns([2, 4, 1])
+        with c1:
+            st.markdown(f"`{entry['label']}`")
+        with c2:
+            st.caption(entry["path"])
+        with c3:
+            if st.button("Remove", key=f"ep_rm_{idx}", width="stretch"):
+                st.session_state.export_custom_paths.pop(idx)
+                _save_campaign_paths(st.session_state.export_custom_paths)
+                st.rerun()
+
+
+def _render_export_settings() -> tuple[str, float]:
+    output_dir = st.text_input("Output directory:", value=str(exported_plots_root()))
+    smoothing = st.slider(
+        "Smoothing:", 0.0, 0.99, 0.9, help="Exponential smoothing (0=none, 0.99=heavy)"
+    )
+    return output_dir, float(smoothing)
+
+
+def _build_export_run_dirs(selected_exports: list[str], available: list[dict]) -> dict[str, str]:
+    run_dirs: dict[str, str] = {}
+    for name in selected_exports:
+        run = next(run for run in available if run["name"] == name)
+        run_dirs[name] = run["path"]
+    for entry in st.session_state.export_custom_paths:
+        run_dirs[entry["label"]] = entry["path"]
+    return run_dirs
+
+
+def _render_export_actions(
+    run_dirs: dict[str, str],
+    output_dir: str,
+    smoothing: float,
+) -> None:
+    st.markdown("#### Export Actions")
+    export_ready = bool(run_dirs)
+    if st.button(
+        "Export Plots",
+        type="primary",
+        width="stretch",
+        disabled=not export_ready,
+    ):
+        if run_dirs:
+            _export_plots(run_dirs, output_dir, smoothing)
+        else:
+            st.error("Select at least one run or add a custom path")
+
+    # This button must live at the top level of the tab. A Streamlit button only
+    # returns True on the rerun immediately after its own click, so a button
+    # rendered inside the export branch disappears before the user can click it.
+    last_export_dir = st.session_state.get("analysis_last_export_dir")
+    if last_export_dir:
+        st.caption(f"Last export: `{last_export_dir}`")
+        if st.button("Open export directory", width="stretch", key="open_export_dir"):
+            _open_directory(last_export_dir)
+
+
+def _render_run_comparison_tab(monitor: TensorboardProcessMonitor) -> None:
+    st.subheader("Run Comparison")
+
+    model_runs = find_model_runs()
+    available = [run for run in model_runs if run["has_events"]]
+    all_names = [run["name"] for run in available]
+
+    if len(available) < 2:
+        st.warning("Need at least 2 models with TensorBoard logs for comparison")
+        return
+
+    selected = st.multiselect(
+        "Select runs to compare:",
+        options=all_names,
+        default=all_names[:2],
+    )
+
+    if len(selected) < 2:
+        st.info("Select at least 2 runs")
+        return
+
+    port, host = _render_comparison_tensorboard_settings()
+    if st.button("Launch TensorBoard Comparison", type="primary", width="stretch"):
+        _launch_tensorboard_comparison(selected, available, port, host, monitor)
+        st.rerun()
+
+    _render_selected_comparison_table(selected, available)
+
+
+def _render_comparison_tensorboard_settings() -> tuple[int, str]:
+    col_port, col_host, _ = st.columns([1, 1, 2])
+    with col_port:
+        port = st.number_input(
+            "Port", value=6007, min_value=1024, max_value=65535, key="tb_cmp_port"
+        )
+    with col_host:
+        host = st.text_input("Host", value="localhost", key="tb_cmp_host")
+    return int(port), host
+
+
+def _launch_tensorboard_comparison(
+    selected: list[str],
+    available: list[dict],
+    port: int,
+    host: str,
+    monitor: TensorboardProcessMonitor,
+) -> None:
+    selected_paths = [run["path"] for run in available if run["name"] in selected]
+    logdir_arg = ",".join(f"{name}:{path}" for name, path in zip(selected, selected_paths))
+    _launch_tensorboard(
+        logdir=logdir_arg,
+        port=port,
+        host=host,
+        label=f"Comparison: {', '.join(selected)}",
+        monitor=monitor,
+    )
+
+
+def _render_selected_comparison_table(selected: list[str], available: list[dict]) -> None:
+    rows = [
+        {
+            "Model": name,
+            "Path": next(run["path"] for run in available if run["name"] == name),
+        }
+        for name in selected
+    ]
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+
+def _render_model_evaluation_tab() -> None:
+    st.subheader("Model Evaluation")
+    st.info("Model evaluation interface coming soon.")
+
+    model_runs = find_model_runs()
+    if not model_runs:
+        st.warning("No trained models found")
+        return
+
+    st.markdown("#### Available Models")
+    for run in model_runs:
+        _render_evaluation_model_row(run)
+
+
+def _render_evaluation_model_row(run: dict) -> None:
+    with st.container():
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st.write(f"**{run['name']}**")
+            st.caption(run["path"])
+        with c2:
             if st.button(
-                "Export Plots",
-                type="primary",
+                "Visualize",
+                key=_model_run_widget_key("eval_viz", run),
                 width="stretch",
-                disabled=not export_ready,
             ):
-                if run_dirs:
-                    _export_plots(run_dirs, output_dir, smoothing)
-                else:
-                    st.error("Select at least one run or add a custom path")
+                st.info("Visualization feature coming soon!")
 
-            # The "Open" button must live at the top level of the tab, not inside
-            # the export-click branch above. A Streamlit button only returns True
-            # on the rerun that immediately follows its own click, so a button
-            # rendered inside the "Export Plots" branch disappears before the user
-            # can click it. Persisting the last export dir in session_state lets us
-            # render the open button on every rerun.
-            last_export_dir = st.session_state.get("analysis_last_export_dir")
-            if last_export_dir:
-                st.caption(f"Last export: `{last_export_dir}`")
-                if st.button("Open export directory", width="stretch", key="open_export_dir"):
-                    _open_directory(last_export_dir)
 
-    with tab3:
-        st.subheader("Run Comparison")
-
-        model_runs = find_model_runs()
-        available = [r for r in model_runs if r["has_events"]]
-        all_names = [r["name"] for r in available]
-
-        if len(available) < 2:
-            st.warning("Need at least 2 models with TensorBoard logs for comparison")
-        else:
-            selected = st.multiselect(
-                "Select runs to compare:",
-                options=all_names,
-                default=all_names[:2],
-            )
-
-            if len(selected) >= 2:
-                col_port2, col_host2, _ = st.columns([1, 1, 2])
-                with col_port2:
-                    port2 = st.number_input(
-                        "Port", value=6007, min_value=1024, max_value=65535, key="tb_cmp_port"
-                    )
-                with col_host2:
-                    host2 = st.text_input("Host", value="localhost", key="tb_cmp_host")
-
-                if st.button("Launch TensorBoard Comparison", type="primary", width="stretch"):
-                    selected_paths = [r["path"] for r in available if r["name"] in selected]
-                    logdir_arg = ",".join(f"{n}:{p}" for n, p in zip(selected, selected_paths))
-                    _launch_tensorboard(
-                        logdir=logdir_arg,
-                        port=port2,
-                        host=host2,
-                        label=f"Comparison: {', '.join(selected)}",
-                        monitor=monitor,
-                    )
-                    st.rerun()
-
-                rows = [
-                    {"Model": n, "Path": next(r["path"] for r in available if r["name"] == n)}
-                    for n in selected
-                ]
-                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-            else:
-                st.info("Select at least 2 runs")
-
-    with tab4:
-        st.subheader("Model Evaluation")
-        st.info("Model evaluation interface coming soon.")
-
-        model_runs = find_model_runs()
-        if model_runs:
-            st.markdown("#### Available Models")
-            for r in model_runs:
-                with st.container():
-                    c1, c2 = st.columns([3, 1])
-                    with c1:
-                        st.write(f"**{r['name']}**")
-                        st.caption(r["path"])
-                    with c2:
-                        if st.button(
-                            "Visualize",
-                            key=_model_run_widget_key("eval_viz", r),
-                            width="stretch",
-                        ):
-                            st.info("Visualization feature coming soon!")
-        else:
-            st.warning("No trained models found")
-
+def _render_analysis_output_info() -> None:
     st.markdown("---")
     st.subheader("Analysis Output Information")
     col1, col2 = st.columns(2)

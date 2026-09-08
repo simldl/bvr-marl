@@ -114,18 +114,32 @@ def test_viz_config_loads():
     assert isinstance(cfg, dict), "load_viz_config() must return a dict"
 
 
-def test_default_viz_config_uses_public_basic_training_config():
-    """Default visualization should use a core-owned public training config."""
+def test_visualization_configs_use_500km_training_config():
+    """Every visualization scenario should use the core-owned 500 km map."""
+    from pathlib import Path
+
     from bvr_marl_core.utils.config_loader import load_train_config, load_viz_config
 
     viz_cfg = load_viz_config()
     assert viz_cfg["checkpoint_path"] is None
     assert viz_cfg["visualization"]["show_text"] is True
-    assert viz_cfg["train_config_path"] == "configs/training/basic.yaml"
+    expected_path = "configs/training/large_map_heterogeneous.yaml"
+    assert viz_cfg["train_config_path"] == expected_path
 
     train_cfg = load_train_config(viz_cfg["train_config_path"])
     assert isinstance(train_cfg["env"], dict)
+    assert train_cfg["env"]["map_size"] == 500
     assert train_cfg["env"]["num_agents_per_side"] > 0
+    awacs_config = train_cfg["env"]["scenario_config"]["awacs_config"]
+    assert awacs_config["orbit_distance_km"] == 200.0
+    assert awacs_config["orbit_pattern"] == "racetrack"
+    assert awacs_config["trail_fighters"] is False
+
+    for config_path in Path("configs/visualization").glob("*.yaml"):
+        config = load_viz_config(config_path)
+        assert config["train_config_path"] == expected_path, config_path
+        scenario_train_config = load_train_config(config["train_config_path"])
+        assert scenario_train_config["env"]["map_size"] == 500, config_path
 
 
 def test_default_viz_config_steps_with_random_actions():

@@ -19,6 +19,7 @@ from bvr_marl_core.aircraft.types.eurofighter import Eurofighter
 from bvr_marl_core.aircraft.types.f22 import F22
 from bvr_marl_core.aircraft.types.f35 import F35
 from bvr_marl_core.aircraft.types.su57 import Su57
+from bvr_marl_core.missiles.fox3.aim260 import AIM260_JATM
 from bvr_marl_core.missiles.fox3.amraam import AIM120_AMRAAM
 from bvr_marl_core.missiles.fox3.default_missile import LongRangeMissile
 from bvr_marl_core.missiles.fox3.k77m import K77M
@@ -69,6 +70,10 @@ MISSILE_REGISTRY: dict[str, type] = {
     "meteor": Meteor,
     "K77M": K77M,
     "k77m": K77M,
+    "AIM260_JATM": AIM260_JATM,
+    "aim260_jatm": AIM260_JATM,
+    "aim260": AIM260_JATM,
+    "jatm": AIM260_JATM,
     "DefaultMissile": LongRangeMissile,
     "default_missile": LongRangeMissile,
     "LongRangeMissile": LongRangeMissile,

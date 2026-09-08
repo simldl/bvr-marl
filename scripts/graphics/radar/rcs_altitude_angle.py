@@ -8,14 +8,14 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from paper_style import paper_figure, save_paper_figure  # noqa: E402
+from paper_style import paper_figure, save_paper_figure
 
-from bvr_marl_core.aircraft.types.eurofighter import Eurofighter  # noqa: E402
-from bvr_marl_core.aircraft.types.f22 import F22  # noqa: E402
-from bvr_marl_core.aircraft.types.f35 import F35  # noqa: E402
-from bvr_marl_core.aircraft.types.su57 import Su57  # noqa: E402
-from bvr_marl_core.radar.core.utils import _effective_rcs  # noqa: E402
-from bvr_marl_core.simulator.core.helpers import Position  # noqa: E402
+from bvr_marl_core.aircraft.types.eurofighter import Eurofighter
+from bvr_marl_core.aircraft.types.f22 import F22
+from bvr_marl_core.aircraft.types.f35 import F35
+from bvr_marl_core.aircraft.types.su57 import Su57
+from bvr_marl_core.radar.core.utils import _effective_rcs
+from bvr_marl_core.simulator.core.helpers import Position
 
 _MAP_LIMITS = {"north": 100000, "south": -100000, "east": 100000, "west": -100000}
 
@@ -35,7 +35,15 @@ def plot_rcs_altitude_angle():
     f22 = F22(**common)
     f35 = F35(**common)
     eurofighter = Eurofighter(**common)
-    su57 = Su57(position=ref_pos, yaw_deg=0.0, speed_mps=250.0, group="red", map_limits=_MAP_LIMITS)
+    su57 = Su57(
+        position=ref_pos,
+        yaw_deg=0.0,
+        speed_mps=250.0,
+        group="red",
+        map_limits=_MAP_LIMITS,
+        min_alt_m=0.0,
+        max_alt_m=20000.0,
+    )
 
     el_deg = np.linspace(-90, 90, 181)
     rcs = {ac: np.zeros_like(el_deg) for ac in ("f22", "f35", "su57", "ef")}

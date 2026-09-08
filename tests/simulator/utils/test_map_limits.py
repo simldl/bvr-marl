@@ -254,15 +254,13 @@ class TestMapLimitsRelativePosition:
         with pytest.raises(ZeroDivisionError):
             limits.relative_position(45.0, -122.0, 6000)
 
-    @patch("numpy.clip")
-    def test_numpy_clip_called(self, mock_clip):
-        """Test that numpy.clip is called for all coordinates."""
-        mock_clip.side_effect = lambda x, min_val, max_val: x  # Pass through
-
+    def test_outputs_clamped_to_unit_interval(self):
+        """All three relative coordinates are clamped into [0, 1]."""
         limits = MapLimits(-124.0, 45.0, -120.0, 47.0, min_alt=1000, max_alt=11000)
-        limits.relative_position(46.0, -122.0, 6000)
 
-        assert mock_clip.call_count == 3  # Called for lat, lon, alt
+        for lat, lon, alt in [(46.0, -122.0, 6000), (90.0, 0.0, 99999), (-90.0, -179.0, -99999)]:
+            for value in limits.relative_position(lat, lon, alt):
+                assert 0.0 <= value <= 1.0
 
     def test_precision_with_small_values(self):
         """Test relative position precision with small coordinate differences."""

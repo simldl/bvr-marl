@@ -20,11 +20,25 @@ class Meteor(Missile):
             "n_max": 40.0,
             "max_speed_mps": 1360.0,  # Mach >4 class sea-level equivalent
             "min_range_m": 2000.0,
+            # Cited kinematic max range (MBDA, "largest NEZ"); ramjet sustain is
+            # long-legged so a higher drag_scale is needed to bleed the long glide
+            # down toward the rated range.
+            "max_range_m": 200_000.0,
+            "drag_scale": 2.5,
             "seeker_sensitivity": 1.3,
             "life_time_s": 160.0,
             "hit_probability": 0.88,
-            # Range-dependent kill probability: Pk falls off with terminal miss.
-            "lethal_radius_m": 100.0,
+            "use_apn": True,  # augmented PN vs maneuvering targets
+            # Range-dependent kill probability: Pk falls off with terminal miss
+            # (Gaussian e-fold; decoupled from the wider fuze/CCD detonation radius).
+            "lethal_radius_m": 250.0,
+            # Weapon-effectiveness submodels: most advanced of the set — large
+            # NEZ, robust two-way datalink, high-reliability seeker/fuze.
+            "warhead_effectiveness": 1.0,
+            "fuze_reliability": 0.96,
+            "guidance_reliability": 0.96,
+            "seeker_reliability": 0.96,
+            "datalink_reliability": 0.97,
             "radar": {
                 "horizontal_fov_deg": 60.0,
                 "vertical_fov_deg": 30.0,

@@ -6,6 +6,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from bvr_marl_core.domain.tactical_contact import TacticalContact
+from bvr_marl_core.rl.environment.rewards.estimated_contact import estimated_contact_from_track
+
 if TYPE_CHECKING:
     from bvr_marl_core.simulator import Simulator
 
@@ -37,14 +40,14 @@ class AgentHelpers:
         if sensor is not None and hasattr(sensor, "get_locked_targets"):
             try:
                 return set(sensor.get_locked_targets() or [])
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
 
         radar = getattr(unit, "radar", None)
         if radar is not None and hasattr(radar, "get_locked_targets"):
             try:
                 return set(radar.get_locked_targets() or [])
-            except Exception:
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
                 pass
 
         locked_targets = getattr(unit, "locked_targets", None)
@@ -96,6 +99,107 @@ class AgentHelpers:
                     incoming.append(unit)
         return incoming
 
+    def get_estimated_contacts_for_agent(
+        self,
+        agent_id: str,
+        *,
+        fighter_limit: int | None = None,
+        missile_limit: int | None = None,
+    ) -> list:
+        """Return unit-like contacts built only from the agent's sensor tracks."""
+        uid = self.agent_to_unit_id.get(agent_id)
+        ownship = self.simulator.active_units.get(uid) if uid is not None else None
+        if ownship is None:
+            return []
+        contacts = []
+        fighter_count = 0
+        missile_count = 0
+        sensor = getattr(ownship, "sensor", None)
+        raw_tracks = getattr(sensor, "sensor_tracks", ()) or ()
+        converter = getattr(sensor, "tactical_contact", TacticalContact.from_track_snapshot)
+        for track in sorted(raw_tracks, key=lambda item: str(item.track_id)):
+            unit_type = track.classification
+            missile_hint = "missile" in unit_type
+            if missile_hint and missile_limit is not None and missile_count >= missile_limit:
+                continue
+            if not missile_hint and fighter_limit is not None and fighter_count >= fighter_limit:
+                continue
+            try:
+                contact = converter(track)
+            except (TypeError, ValueError):
+                continue
+            if contact.suspect_deception:
+                continue
+            if contact.is_missile:
+                if missile_limit is not None and missile_count >= missile_limit:
+                    continue
+                missile_count += 1
+            else:
+                if not contact.engageable:
+                    continue
+                if fighter_limit is not None and fighter_count >= fighter_limit:
+                    continue
+                fighter_count += 1
+            contacts.append(estimated_contact_from_track(ownship, contact))
+            if (
+                fighter_limit is not None
+                and missile_limit is not None
+                and fighter_count >= fighter_limit
+                and missile_count >= missile_limit
+            ):
+                break
+        return contacts
+
+    def get_estimated_enemies_for_agent(self, agent_id: str) -> list:
+        """Return engageable non-missile contacts for observation-only rewards."""
+        return [
+            contact
+            for contact in self.get_estimated_contacts_for_agent(agent_id)
+            if contact.operational_contact.engageable and not contact.is_missile
+        ]
+
+    def get_estimated_targets_for_agent(self, agent_id: str) -> list:
+        """Return currently locked operational contacts without truth resolution."""
+        uid = self.agent_to_unit_id.get(agent_id)
+        ownship = self.simulator.active_units.get(uid) if uid is not None else None
+        locked_ids = self.get_locked_target_ids(ownship)
+        return [
+            contact
+            for contact in self.get_estimated_enemies_for_agent(agent_id)
+            if contact.id in locked_ids
+        ]
+
+    def get_estimated_incoming_missiles_for_agent(self, agent_id: str) -> list:
+        """Return missile contacts seen by ownship rather than simulator missiles."""
+        return [
+            contact
+            for contact in self.get_estimated_contacts_for_agent(agent_id)
+            if contact.is_missile
+        ]
+
+    def get_estimated_reward_context(
+        self,
+        agent_id: str,
+        *,
+        fighter_limit: int | None = None,
+        missile_limit: int | None = None,
+    ) -> tuple[list, list, list]:
+        """Partition one contact snapshot into enemies, locked targets, and missiles."""
+        uid = self.agent_to_unit_id.get(agent_id)
+        ownship = self.simulator.active_units.get(uid) if uid is not None else None
+        locked_ids = self.get_locked_target_ids(ownship)
+        contacts = self.get_estimated_contacts_for_agent(
+            agent_id, fighter_limit=fighter_limit, missile_limit=missile_limit
+        )
+        enemies = [
+            contact
+            for contact in contacts
+            if contact.operational_contact.engageable and not contact.is_missile
+        ]
+        targets = [contact for contact in enemies if contact.id in locked_ids]
+        missiles = [contact for contact in contacts if contact.is_missile]
+        return enemies, targets, missiles
+
     def fix_all_radar_locks(self, all_agent_ids: list[str]):
         """
         Training aid: Force radar locks on enemy aircraft.
@@ -140,7 +244,7 @@ class AgentHelpers:
                         # NORMAL MODE: Only lock detected targets
                         if hasattr(unit.sensor, "sensor_tracks"):
                             # sensor_tracks format: [(target_id, state, cov, ...)]
-                            detected_ids = [track[0] for track in unit.sensor.sensor_tracks]
+                            detected_ids = [track.track_id for track in unit.sensor.sensor_tracks]
                             if other_unit.id in detected_ids:
                                 targets_to_lock.append(other_unit.id)
 

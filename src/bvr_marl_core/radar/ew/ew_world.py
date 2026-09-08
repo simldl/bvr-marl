@@ -1,168 +1,55 @@
-"""
-EWWorld: Global manager for electronic warfare interactions.
-Coordinates jamming effects and deception returns across all radars in the simulation.
+"""EWWorld: global coordinator for electronic-warfare interactions.
+
+Current scope is noise jamming modelled as *range denial* (see
+radar/ew/noise_jammer.py). For a victim aircraft radar it reports, per enemy
+jammer, the range inside which the radar burns through the jamming and recovers a
+usable range measurement. Beyond that range the jammer's skin return stays
+detectable on the correct bearing but its range is denied (a strobe). Missile
+seekers are not jam-susceptible.
+
+The previous SNR-degradation + DRFM false-target ("ghost") model has been removed.
 """
 
-import math
-from typing import Any
-
-from bvr_marl_core.radar.core.utils import geodetic_to_enu
+from bvr_marl_core.radar.core.utils import _effective_rcs
+from bvr_marl_core.radar.ew.noise_jammer import burn_through_range_m
 
 
 class EWWorld:
-    """
-    Central coordinator for ECM (Electronic Counter-Measures) in the simulation.
-
-    Manages:
-    - Jamming power accumulation from multiple enemy jammers
-    - Deception return (ghost) injection into victim radars
-    - Cooperative jamming assist allocation (future)
-    """
-
     def __init__(self, sim):
-        """
-        Initialize EWWorld.
-
-        Args:
-            sim: Simulator instance with access to active_units registry
-        """
         self.sim = sim
 
-    def collect_incoming(
-        self, victim_radar, t: float
-    ) -> tuple[list[tuple[float, float, float]], list[dict[str, Any]]]:
-        """
-        Collect all incoming jamming effects on a victim radar.
+    def collect_range_denial(self, victim_radar, t: float = 0.0) -> dict[int, float]:
+        """Burn-through range (m) per enemy jammer threatening ``victim_radar``.
 
-        This is the main hook called by each radar during its update cycle.
-        For aircraft radars (jam_susceptible=True), accumulates:
-        - Per-jammer info (azimuth, elevation, power) for angular weighting
-        - Deception returns (ghosts) from enemy DRFM techniques
-
-        For missile seekers (jam_susceptible=False), returns zero effect.
-
-        Args:
-            victim_radar: The radar being jammed
-            t: Current simulation time (seconds)
-
-        Returns:
-            (jammer_info, ghosts) where:
-                jammer_info: list of (jammer_az_deg, jammer_el_deg, J_power) tuples
-                ghosts: list of synthetic detection dicts with is_deception=True
+        Returns a dict ``{jammer_target_id: burn_through_range_m}``. A detection of
+        one of these jammers is range-denied when its true range exceeds the
+        corresponding burn-through range. Empty for missile seekers (not
+        jam-susceptible) or when nothing is jamming.
         """
         if not getattr(victim_radar, "jam_susceptible", True):
-            return [], []
+            return {}
 
         victim_owner = getattr(victim_radar, "owner", None)
         if victim_owner is None or not hasattr(victim_owner, "position"):
-            return [], []
-
-        victim_position = victim_owner.position
+            return {}
         victim_group = getattr(victim_owner, "group", None)
+        victim_pos = victim_owner.position
 
-        jammer_info = []
-        ghosts = []
-
+        denial: dict[int, float] = {}
         for unit in self.sim.active_units.values():
-            ecm = getattr(unit, "ecm", None)
-            if ecm is None:
+            burn_km = float(getattr(unit, "noise_jammer_burn_through_km", 0.0))
+            if burn_km <= 0.0:
                 continue
-
-            if unit.group == victim_group:
+            if getattr(unit, "group", None) == victim_group:
                 continue
-
-            jammer_enu = geodetic_to_enu(
-                unit.position.lat,
-                unit.position.lon,
-                unit.position.alt,
-                victim_position.lat,
-                victim_position.lon,
-                victim_position.alt,
-            )
-            e, n, u = jammer_enu
-            jammer_az_deg = math.degrees(math.atan2(n, e))
-            jammer_el_deg = math.degrees(math.atan2(u, math.sqrt(e * e + n * n)))
-
-            J_power = ecm.compute_J(victim_radar, t, victim_position)
-            jammer_info.append((jammer_az_deg, jammer_el_deg, J_power))
-
-            burst = ecm.deception_burst(victim_radar, victim_position, t)
-            ghosts.extend(burst)
-
-        return jammer_info, ghosts
-
-    def schedule_assist(self, own_radar, team_radars, enemy_tracks, t: float, K: int = 2):
-        """
-        Cooperative jamming assist scheduling.
-
-        Uses TrackPrioritySystem to:
-        - Identify highest-priority enemy radars threatening teammates
-        - Allocate jammer time/beam toward threats in assist sectors
-        - Coordinate multi-ship jamming for maximum effect
-
-        Args:
-            own_radar: Ownship radar/ECM system
-            team_radars: list of friendly radars in datalink
-            enemy_tracks: list of enemy track records
-            t: Current simulation time
-            K: Number of top threats to jam
-
-        Notes:
-            Light implementation using threat scoring.
-            Focuses jamming on K highest-priority threats.
-        """
-        if not hasattr(own_radar, "owner") or own_radar.owner is None:
-            return
-
-        # Get ECM system
-        ecm = getattr(own_radar.owner, "ecm", None)
-        if ecm is None:
-            return
-
-        try:
-            scored_tracks = []
-            for track in enemy_tracks:
-                (
-                    tid,
-                    state,
-                    cov,
-                    tgt,
-                    utype,
-                    ref,
-                    confidence,
-                    n_obs,
-                    lifetime,
-                    update_count,
-                    is_deception,
-                    suspect_deception,
-                    engagement_id,
-                    jammer_id,
-                    engageable,
-                ) = track
-                if tgt is None or suspect_deception:
-                    continue
-                dist = float((state[0] ** 2 + state[1] ** 2 + state[2] ** 2) ** 0.5)
-                scored_tracks.append((track, 1.0 / (dist + 1.0), tgt))
-
-            scored_tracks.sort(key=lambda x: x[1], reverse=True)
-
-            for track, score, tgt in scored_tracks[:K]:
-                if self._teammate_needs_assist(own_radar.owner, team_radars, tgt):
-                    pass
-
-        except Exception:
-            pass
-
-    def _teammate_needs_assist(self, ownship, team_radars, threat):
-        """
-        Check if a teammate needs jamming assist against a threat.
-
-        Args:
-            ownship: Own aircraft
-            team_radars: list of (radar, position) tuples
-            threat: Threat target
-
-        Returns:
-            True if assist is needed
-        """
-        return False
+            uid = getattr(unit, "id", None)
+            if uid is None:
+                continue
+            # Effective RCS the victim sees (same aspect model as detection), so a
+            # bigger/less-stealthy jammer is burnt through farther.
+            try:
+                sigma_eff = float(_effective_rcs(unit, victim_pos))
+            except Exception:
+                sigma_eff = 1.0
+            denial[uid] = burn_through_range_m(victim_radar, burn_km, sigma_eff)
+        return denial

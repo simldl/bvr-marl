@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, model_validator
 
-from .version import SCHEMA_VERSION, SUPPORTED_VERSIONS
+from bvr_marl_core.schema.version import SCHEMA_VERSION, SUPPORTED_VERSIONS
 
 
 class NestedModel(BaseModel):
@@ -80,7 +80,7 @@ class VersionedModel(BaseModel):
         It runs migration first so callers do not need to remember to call
         ``migrate_config`` separately.
         """
-        from .migration import migrate_config
+        from bvr_marl_core.schema.migration import migrate_config
 
         migrated = migrate_config(raw)
         return cls.model_validate(migrated)

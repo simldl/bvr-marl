@@ -1,8 +1,24 @@
+import math
+
+import numpy as np
+
 from bvr_marl_core.aircraft.core.nez import NoEscapeZoneCalculator
 from bvr_marl_core.aircraft.core.target_prio import TrackPrioritySystem
 from bvr_marl_core.aircraft.systems.missile_warner import MissileWarner
 from bvr_marl_core.aircraft.systems.passive_radar import PassiveRadar
+from bvr_marl_core.domain.information import TrackSnapshot
+from bvr_marl_core.domain.sensing_visibility import is_sensor_invisible_to
+from bvr_marl_core.domain.tactical_contact import TacticalContact
 from bvr_marl_core.simulator.core.helpers import units_distance_km
+
+# Observable-evidence hazard rates used by the probabilistic battle-damage
+# assessment.  They deliberately permit both false positives and false negatives;
+# true aircraft damage is evaluator-only state and is never consulted here.
+_BDA_BASE_RATE_PER_S = 0.002
+_BDA_DESCENT_RATE_PER_S = 0.9
+_BDA_INCONSISTENCY_RATE_PER_S = 0.35
+_BDA_CONFIDENCE_COLLAPSE_RATE_PER_S = 0.4
+_BDA_TRACK_LOSS_RATE_PER_S = 0.12
 
 
 class AircraftSensorSystem:
@@ -26,6 +42,13 @@ class AircraftSensorSystem:
         self.passive_nez = {}
         self._active_dlz = {}  # full DLZ object per target_id; reused by get_nez_features
         self.warnings = []
+        # Battle-damage assessment: target ids this platform has confirmed as
+        # killed by watching them go down (see update_sensor_data). Exposed to the
+        # agent so it does not keep shooting an already-dead contact.
+        self.bda_confirmed: set = set()
+        self.bda_probability: dict[object, float] = {}
+        self._bda_history: dict[object, dict] = {}
+        self._bda_thresholds: dict[object, float] = {}
 
         conf = getattr(parent, "config", {}) or {}
         ang_err = conf.get(
@@ -55,16 +78,48 @@ class AircraftSensorSystem:
 
         self.track_prioritizer = TrackPrioritySystem(parent)
 
-    def update_sensor_data(self, sim, tick_secs):
-        sim_time = getattr(sim, "elapsed_time_s", None)
+    def tactical_contact(self, track: TrackSnapshot) -> TacticalContact:
+        """Export a truth-free contact with the track's source-qualified lineage."""
+        if not isinstance(track, TrackSnapshot):
+            raise TypeError("Operational sensor tracks must be TrackSnapshot values.")
+        return TacticalContact.from_track_snapshot(track)
 
+    def stage_sensor_reports(self, sim, tick_secs) -> None:
+        """Freeze raw reports against the common start-of-tick world state."""
         if self.radar:
-            self.sensor_tracks = self.radar.update_for_sensors(
-                tick_secs,
-                sim,
-                owner_position=self.parent.position,
-                steer_h=getattr(self.parent, "beam_rate_hz", 5.0),
-                steer_p=getattr(self.parent, "beam_rate_p_hz", 3.0),
+            stage = getattr(self.radar, "stage_reports_for_sensors", None)
+            if callable(stage):
+                stage(
+                    tick_secs,
+                    sim,
+                    owner_position=self.parent.position,
+                    steer_h=getattr(self.parent, "beam_rate_hz", 5.0),
+                    steer_p=getattr(self.parent, "beam_rate_p_hz", 3.0),
+                )
+                self._legacy_staged_tracks = None
+            else:
+                self._legacy_staged_tracks = self.radar.update_for_sensors(
+                    tick_secs,
+                    sim,
+                    owner_position=self.parent.position,
+                    steer_h=getattr(self.parent, "beam_rate_hz", 5.0),
+                    steer_p=getattr(self.parent, "beam_rate_p_hz", 3.0),
+                )
+
+    def update_sensor_data(self, sim, tick_secs):
+        """Compatibility wrapper for callers outside the globally staged simulator."""
+        self.stage_sensor_reports(sim, tick_secs)
+        self.update_from_staged_reports(sim, tick_secs)
+
+    def update_from_staged_reports(self, sim, tick_secs) -> None:
+        """Fuse frozen reports, publish contacts, warnings, aids, and BDA."""
+        sim_time = getattr(sim, "elapsed_time_s", None)
+        if self.radar:
+            finish = getattr(self.radar, "update_from_staged_sensor_reports", None)
+            self.sensor_tracks = (
+                finish(tick_secs, sim, owner_position=self.parent.position)
+                if callable(finish)
+                else self._legacy_staged_tracks
             )
         else:
             self.sensor_tracks = []
@@ -74,6 +129,7 @@ class AircraftSensorSystem:
             self.active_nez = {}
             self.passive_nez = {}
             self._active_dlz = {}
+            self.dlz_uncertainty = {}
             self._last_nez_positions = {}
 
         elapsed = sim.elapsed_time_s
@@ -82,46 +138,71 @@ class AircraftSensorSystem:
         for unit in sim.active_units.values():
             if unit is self.parent:
                 continue
+            # Sensor-invisible HOSTILES are dropped here for the same reason the radar
+            # drops them at enumeration: everything below is per-candidate. Two paths
+            # would otherwise put an "invisible" AWACS back into the picture:
+            #   * the RWR/passive branch just below -- an AWACS is a 250 km emitter, and
+            #     one-way RWR range is a multiple of that, so it would be the single most
+            #     detectable thing on the map while being unseeable by radar;
+            #   * the oracle branch, which builds `current_enemy_ids` and the DLZ table
+            #     straight from `all_non_self`.
+            # The helper is hostile-only, so a friendly AWACS stays fully visible to the
+            # team it is supporting.
+            if is_sensor_invisible_to(unit, parent_group):
+                continue
             all_non_self.append(unit)
-            if hasattr(unit, "emit_radar") and unit.group != parent_group:
-                self.passive_radar.receive_emission(unit, self.parent, elapsed)
+            # RWR/passive detection: an enemy is picked up only while its radar is
+            # actively emitting (EMCON off = invisible here) and only within the
+            # one-way RWR detection range, which exceeds the emitter's own two-way
+            # detection range (a receiver hears an emitter before the emitter can
+            # burn through on it).
+            if unit.group != parent_group and self._is_rwr_detectable(unit):
+                streams = getattr(sim, "random_streams", None)
+                rng = (
+                    streams.generator(
+                        "passive_rf", f"{getattr(self.parent, 'id', 0)}:{getattr(unit, 'id', 0)}"
+                    )
+                    if streams is not None
+                    else None
+                )
+                self.passive_radar.receive_emission(unit, self.parent, elapsed, rng=rng)
 
-        current_enemy_ids = {u.id for u in all_non_self if u.group != parent_group}
+        sensor_limited = str(getattr(sim, "information_mode", "sensor_limited")).lower() != "oracle"
+        current_enemy_ids = (
+            {track.track_id for track in self.sensor_tracks}
+            if sensor_limited
+            else {u.id for u in all_non_self if u.group != parent_group}
+        )
         self.active_nez = {k: v for k, v in self.active_nez.items() if k in current_enemy_ids}
         self.passive_nez = {k: v for k, v in self.passive_nez.items() if k in current_enemy_ids}
         self._active_dlz = {k: v for k, v in self._active_dlz.items() if k in current_enemy_ids}
+        self.dlz_uncertainty = {
+            k: v for k, v in self.dlz_uncertainty.items() if k in current_enemy_ids
+        }
         self._last_nez_positions = {
             k: v for k, v in self._last_nez_positions.items() if k in current_enemy_ids
         }
 
-        # Update NEZ only for enemies and only when a unit has moved significantly (>200m or >50 m/s)
-        for u in all_non_self:
-            if u.group == parent_group:
-                continue  # DLZ/NEZ only meaningful for enemies
-            needs_update = u.id not in self.active_nez
-            if not needs_update and u.id in self._last_nez_positions:
-                last_pos = self._last_nez_positions[u.id]
-                needs_update = (
-                    abs(u.position.lat - last_pos[0]) > 0.002
-                    or abs(u.position.lon - last_pos[1]) > 0.002
-                    or abs(u.position.alt - last_pos[2]) > 200
-                    or abs(getattr(u, "speed", 0) - last_pos[3]) > 50
-                )
-            elif not needs_update:
-                needs_update = True
-
-            if needs_update:
-                # compute_dlz result is cached per tick; active_nez/passive_nez read from it
+        if sensor_limited:
+            for track in self.sensor_tracks:
+                tid, state, covariance = track.track_id, track.state, track.covariance
+                try:
+                    estimate = self.nez_calc.compute_dlz_from_track(state, covariance)
+                except (TypeError, ValueError):
+                    continue
+                self._active_dlz[tid] = estimate.nominal
+                self.active_nez[tid] = max(estimate.nominal.r_nez_out_m, estimate.nominal.r_min_m)
+                self.passive_nez[tid] = 0.0
+                self.dlz_uncertainty[tid] = estimate
+        else:
+            # Oracle diagnostics retain exact geometry for comparison studies.
+            for u in all_non_self:
+                if u.group == parent_group:
+                    continue
                 dlz = self.nez_calc.compute_dlz(u)
                 self._active_dlz[u.id] = dlz
                 self.active_nez[u.id] = max(dlz.r_nez_out_m, dlz.r_min_m)
                 self.passive_nez[u.id] = self.nez_calc.passive_nez(u)
-                self._last_nez_positions[u.id] = (
-                    u.position.lat,
-                    u.position.lon,
-                    u.position.alt,
-                    getattr(u, "speed", 0),
-                )
 
         if sim_time is not None:
             self.missile_warner.check_for_new_missiles(sim_time, sim)
@@ -129,8 +210,121 @@ class AircraftSensorSystem:
         else:
             self.warnings = []
 
-        raw_tracks = [(state, cov) for tid, state, cov, *_ in getattr(self, "sensor_tracks", [])]
+        self._update_bda(sim, tick_secs)
+
+        raw_tracks = [
+            (track.state, track.covariance) for track in getattr(self, "sensor_tracks", [])
+        ]
         self.prioritized_tracks = self.track_prioritizer.prioritize(raw_tracks)
+
+    def _update_bda(self, sim, tick_secs: float) -> None:
+        """Update kill-assessment beliefs using sensor products only.
+
+        A contact becomes increasingly suspect after persistent rapid descent,
+        kinematic motion inconsistent with its previous estimate, confidence
+        collapse, or short-term disappearance.  A stable per-contact random
+        threshold turns that probability into a fallible confirmation without
+        consulting a target object or evaluator damage flag.
+        """
+        now_s = float(getattr(sim, "elapsed_time_s", 0.0) or 0.0)
+        dt_s = max(float(tick_secs), 1e-6)
+        seen: set[object] = set()
+
+        for track in self.sensor_tracks:
+            tid = track.track_id
+            raw_state, raw_covariance = track.state, track.covariance
+            if tid is None:
+                continue
+            try:
+                state = np.asarray(raw_state, dtype=float).reshape(-1)
+                covariance = np.asarray(raw_covariance, dtype=float)
+            except (TypeError, ValueError):
+                continue
+            if state.size < 6 or covariance.shape[0] < 3 or covariance.shape[1] < 3:
+                continue
+
+            seen.add(tid)
+            confidence = float(track.confidence)
+            previous = self._bda_history.get(tid)
+            descent_score = float(np.clip((-state[5] - 15.0) / 45.0, 0.0, 1.0))
+            inconsistency_score = 0.0
+            confidence_collapse = 0.0
+            if previous is not None:
+                history_dt = max(now_s - float(previous["time_s"]), dt_s)
+                predicted_position = previous["state"][:3] + previous["state"][3:6] * history_dt
+                residual_m = float(np.linalg.norm(state[:3] - predicted_position))
+                sigma_m = math.sqrt(max(float(np.trace(covariance[:3, :3])), 1.0))
+                inconsistency_score = float(np.clip((residual_m / sigma_m - 2.0) / 4.0, 0.0, 1.0))
+                confidence_collapse = float(
+                    np.clip((float(previous["confidence"]) - confidence) / 0.4, 0.0, 1.0)
+                )
+
+            hazard = (
+                _BDA_BASE_RATE_PER_S
+                + _BDA_DESCENT_RATE_PER_S * descent_score
+                + _BDA_INCONSISTENCY_RATE_PER_S * inconsistency_score
+                + _BDA_CONFIDENCE_COLLAPSE_RATE_PER_S * confidence_collapse
+            )
+            self._advance_bda_probability(sim, tid, hazard, dt_s)
+            self._bda_history[tid] = {
+                "state": state[:6].copy(),
+                "confidence": confidence,
+                "time_s": now_s,
+                "descent_score": descent_score,
+            }
+
+        # A recently observed contact disappearing after anomalous flight is
+        # weak evidence, not an automatic kill declaration.
+        for tid, previous in tuple(self._bda_history.items()):
+            if tid in seen:
+                continue
+            age_s = now_s - float(previous["time_s"])
+            if age_s <= 8.0:
+                loss_evidence = max(0.1, float(previous.get("descent_score", 0.0)))
+                self._advance_bda_probability(
+                    sim, tid, _BDA_TRACK_LOSS_RATE_PER_S * loss_evidence, dt_s
+                )
+            elif age_s > 30.0:
+                self._bda_history.pop(tid, None)
+
+    def _advance_bda_probability(self, sim, tid, hazard_per_s: float, dt_s: float) -> None:
+        prior = float(self.bda_probability.get(tid, 0.0))
+        posterior = 1.0 - (1.0 - prior) * math.exp(-max(hazard_per_s, 0.0) * dt_s)
+        self.bda_probability[tid] = float(np.clip(posterior, 0.0, 1.0))
+        if tid not in self._bda_thresholds:
+            streams = getattr(sim, "random_streams", None)
+            if streams is None:
+                # Deterministic fallback keeps the operational path independent
+                # of module-global random state in lightweight test doubles.
+                threshold = 0.5
+            else:
+                observer_id = getattr(self.parent, "id", "unregistered")
+                threshold = float(streams.generator("bda", f"{observer_id}:{tid}").random())
+            self._bda_thresholds[tid] = threshold
+        if posterior >= self._bda_thresholds[tid]:
+            self.bda_confirmed.add(tid)
+
+    # Multiplier from an emitter's two-way radar range to the one-way range at
+    # which an RWR can passively detect its emissions.
+    RWR_RANGE_FACTOR = 1.3
+
+    def _is_rwr_detectable(self, emitter) -> bool:
+        """True if ``emitter`` is currently detectable by this platform's RWR.
+
+        Requires the emitter to have a radar that is actively emitting, and to lie
+        within the one-way RWR detection range (RWR_RANGE_FACTOR x the emitter's
+        radar max range). Emitters without a radar (e.g. missiles) are ignored here.
+        """
+        radar = getattr(emitter, "radar", None)
+        if radar is None:
+            return False
+        if not getattr(emitter, "radar_emitting", True):
+            return False
+        rwr_range_m = float(getattr(radar, "max_range_m", 0.0)) * self.RWR_RANGE_FACTOR
+        if rwr_range_m <= 0.0:
+            return False
+        dist_m = units_distance_km(self.parent, emitter) * 1000.0
+        return dist_m <= rwr_range_m
 
     def get_locked_targets(self):
         """Returns set of locked target_id(s) (Multi-Lock!)."""
@@ -177,7 +371,9 @@ class AircraftSensorSystem:
 
         Returns dict with:
         - active_nez: scalar (backward compat)
+        - active_nez_by_target: dict {target_id: scalar}
         - active_dlz: full DLZ object for the selected target (or None)
+        - active_dlz_by_target: dict {target_id: full DLZ object}
         - passive_nez: dict {target_id: scalar}
 
         Uses the DLZ stored during update_sensor_data(); performs no new computation.
@@ -191,6 +387,9 @@ class AircraftSensorSystem:
 
         return {
             "active_nez": active_val,
+            "active_nez_by_target": dict(self.active_nez),
             "active_dlz": active_dlz,
+            "active_dlz_by_target": dict(self._active_dlz),
+            "dlz_uncertainty_by_target": dict(getattr(self, "dlz_uncertainty", {})),
             "passive_nez": passive_dict,
         }

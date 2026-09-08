@@ -2,10 +2,14 @@ import math
 
 import numpy as np
 
-from bvr_marl_core.radar.core.utils import _angles_dist, _doppler, _effective_rcs
+from bvr_marl_core.radar.core.utils import (
+    _doppler,
+    _effective_rcs,
+    has_effective_earth_line_of_sight,
+)
 from bvr_marl_core.simulator.core.helpers import Position
 from bvr_marl_core.simulator.core.units import Unit
-from bvr_marl_core.simulator.utils.angles import signed_yaw_deg_diff, yaw_geo_to_math
+from bvr_marl_core.simulator.utils.angles import signed_yaw_deg_diff
 
 # Default half-width (m/s) of the pulse-Doppler "main-lobe clutter" notch enabled
 # on operational radars/seekers. A target whose LOS-projected closing rate falls
@@ -13,6 +17,19 @@ from bvr_marl_core.simulator.utils.angles import signed_yaw_deg_diff, yaw_geo_to
 # defensive maneuver). The base Radar keeps the notch disabled (0.0) so generic
 # unit tests are unaffected; operational aircraft/missile radars opt in.
 DEFAULT_NOTCH_VELOCITY_MPS = 50.0
+
+# Convert a resolution-cell *width* into the 1-sigma measurement uncertainty it
+# implies. A measurement known only to lie somewhere inside a cell of width w is
+# uniformly distributed over it, so its standard deviation is w/sqrt(12) -- not the
+# half-width w/2, which is the *maximum* error and overstates sigma by sqrt(3).
+# Reports feed a chi-square association gate, so inflating sigma this way makes
+# well-separated aircraft look statistically compatible and merges their tracks.
+CELL_WIDTH_TO_SIGMA = 1.0 / math.sqrt(12.0)
+
+
+def resolution_cell_sigma(cell_width: float) -> float:
+    """1-sigma measurement uncertainty implied by a resolution cell of this width."""
+    return abs(float(cell_width)) * CELL_WIDTH_TO_SIGMA
 
 
 class RadarObsGenerator:
@@ -29,18 +46,23 @@ class RadarObsGenerator:
         notch_velocity_mps: float = 0.0,
         meas_angular_noise_deg: float = 0.0,
         meas_range_noise_m: float = 0.0,
+        doppler_noise_hz: float = 0.0,
     ):
         self.h_fov_deg = horizontal_fov_deg
         self.v_fov_deg = vertical_fov_deg
         self.max_range_m = max_range_m
         self.lut = lut
         self.snr_threshold_db = snr_threshold_db
-        self.np_rng = np_rng or np.random.default_rng()
+        self.np_rng = np_rng if np_rng is not None else np.random.default_rng(0)
         self.notch_velocity_mps = float(notch_velocity_mps)
         # Reported-measurement noise (0 = perfect report). Angular noise gives a
         # range-scaled cross-range error; range noise is an along-LOS floor.
         self.meas_angular_noise_deg = float(meas_angular_noise_deg)
         self.meas_range_noise_m = float(meas_range_noise_m)
+        self.doppler_noise_hz = max(0.0, float(doppler_noise_hz))
+        # Acquisition-only evaluator side channel. It is consumed immediately by
+        # Radar for attribution diagnostics and never enters a report or datalink.
+        self.last_detection_targets: tuple[object, ...] = ()
 
     @staticmethod
     def _vel_xyz(v) -> tuple[float, float, float]:
@@ -100,9 +122,18 @@ class RadarObsGenerator:
         return (a / vn) ** 2
 
     def generate(
-        self, pos, targets, yaw_deg, pitch_deg, own_group=None, own_id=None, own_velocity=None
+        self,
+        pos,
+        targets,
+        yaw_deg,
+        pitch_deg,
+        own_group=None,
+        own_id=None,
+        own_velocity=None,
+        dwell_time_s: float = 1.0,
     ):
         dets = []
+        detected_targets = []
         h_half = self.h_fov_deg * 0.5
         v_half = self.v_fov_deg * 0.5
         max_rng = self.max_range_m
@@ -123,6 +154,8 @@ class RadarObsGenerator:
 
             if dist > max_rng:
                 continue
+            if not has_effective_earth_line_of_sight(hd, pos.alt, tp.alt):
+                continue
 
             az_abs_rad = math.atan2(dE, dN)
             az_abs = math.degrees(az_abs_rad)
@@ -135,13 +168,25 @@ class RadarObsGenerator:
 
             # Pass pre-computed ENU deltas to skip redundant bearing+ENU in _effective_rcs
             eff_rcs = _effective_rcs(tgt, pos, _dE_r2t=dE, _dN_r2t=dN, _dU_r2t=dU)
-            p = self.lut.get_probability(dist, eff_rcs)
+            p_reference = float(self.lut.get_probability(dist, eff_rcs))
+            # Interpret the LUT value as a one-second reference probability and
+            # convert it to a time-consistent dwell hazard.
+            rate = -math.log(max(1.0 - min(p_reference, 1.0 - 1e-12), 1e-12))
+            p = 1.0 - math.exp(-rate * max(float(dwell_time_s), 0.0))
             # Doppler notch: suppress targets beaming the radar (range rate ~ 0).
             p *= self._notch_detection_factor(dE, dN, dU, dist, tgt, own_velocity)
             if self.np_rng.random() > p:
                 continue
 
-            dop = _doppler(tgt, az_abs, el_abs, self.lut.freq_hz)
+            dop = _doppler(
+                tgt,
+                az_abs,
+                el_abs,
+                self.lut.freq_hz,
+                radar_velocity=own_velocity,
+            )
+            if self.doppler_noise_hz > 0.0:
+                dop += float(self.np_rng.normal(0.0, self.doppler_noise_hz))
 
             # Measurement noise on the *reported* az/el/d (the detection decision
             # above used the true range). Angular noise dominates: cross-range
@@ -151,10 +196,10 @@ class RadarObsGenerator:
             az_rep, el_rep, d_rep = self._apply_measurement_noise(az_abs, el_abs, dist)
 
             snr_db = self.snr_threshold_db + self.np_rng.uniform(2.0, 8.0)
-            dets.append(
-                {"T": tgt, "az": az_rep, "el": el_rep, "d": d_rep, "dop": dop, "snr_db": snr_db}
-            )
+            dets.append({"az": az_rep, "el": el_rep, "d": d_rep, "dop": dop, "snr_db": snr_db})
+            detected_targets.append(tgt)
 
+        self.last_detection_targets = tuple(detected_targets)
         return dets
 
     def detect(

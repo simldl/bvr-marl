@@ -86,7 +86,7 @@ def test_auto_fire_controlled():
     # Configure auto-fire on agent
     from bvr_marl_core.rl.environment.spaces.action_space import ActionProcessor
 
-    action_processor = ActionProcessor(simulator)
+    action_processor = ActionProcessor(simulator, information_mode="oracle")
     action_processor.configure_automation(
         enable_missile_automation=True,
         missile_auto_sqi_threshold=0.3,

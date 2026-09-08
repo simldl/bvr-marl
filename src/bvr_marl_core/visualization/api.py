@@ -1,4 +1,4 @@
-"""Stable public visualization bridge API for bvr-marl-core.
+"""Stable public visualization bridge API for bvr-marl.
 
 Extension packages that implement RL/BT
 explainability views must import visualization infrastructure from this
@@ -19,16 +19,16 @@ TrainedModelWrapper
 
 from __future__ import annotations
 
-from bvr_marl_core.visualization.model_wrapper.model_wrapper import (  # noqa: F401
+from bvr_marl_core.visualization.model_wrapper.model_wrapper import (
     DefaultModel,
     TrainedModelWrapper,
 )
-from bvr_marl_core.visualization.scenario_overlays import (  # noqa: F401
+from bvr_marl_core.visualization.scenario_overlays import (
     normalize_map_extents_mode,
     normalize_visualization_scenario,
     select_display_limits,
 )
-from bvr_marl_core.visualization.utils.combined_visualizer import CombinedVisualizer  # noqa: F401
+from bvr_marl_core.visualization.utils.combined_visualizer import CombinedVisualizer
 
 __all__ = [
     "CombinedVisualizer",

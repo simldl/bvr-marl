@@ -8,9 +8,9 @@ checkpoint_path: null
 # Path to model config override file (optional)
 model_config_path: null
 
-# Path to training config file (optional, defaults to the public baseline config)
+# Path to the core-owned 500 km evaluation scenario
 # IMPORTANT: This must match the config used to train the checkpoint!
-train_config_path: configs/training/basic.yaml
+train_config_path: configs/training/large_map_heterogeneous.yaml
 
 # Environment type: "bvr" (full radar/AWACS/gun) or "simplified" (truth obs, 4-dim actions)
 env_type: bvr
@@ -29,3 +29,6 @@ visualization:
   dpi: 200            # Render resolution: 200=default, 300=high, 400=ultra
   symbol_scale: 2.0   # Sprite magnification: 1.0=original, 2.0=double (default), 3.0=triple
   show_text: true      # Show aircraft labels, status overlays, and scale-bar labels
+  labeling:
+    focus_unit_id: null       # Optional fixed unit id; hover selects in interactive mode
+    video_focus_rule: none    # none, first, or nearest_threat

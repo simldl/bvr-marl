@@ -5,16 +5,13 @@ Interface for creating, editing and tracking visualization configurations.
 Saves configurations to visualization/configs/ directory.
 """
 
-import json
-import os
-from copy import deepcopy
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
 import yaml
 
+from bvr_marl_core.gui.components.config_diff import collect_config_differences
 from bvr_marl_core.visualization.scenario_overlays import (
     get_visualization_scenario,
     list_visualization_scenarios,
@@ -188,10 +185,13 @@ def create_default_viz_config() -> dict[str, Any]:
 def render_model_and_training_settings():
     """Render model and training configuration selection."""
     st.subheader("Model & Training Configuration")
-
     config = st.session_state.current_viz_config
+    _render_model_selection(config)
+    _render_training_config_selection(config)
+    _render_environment_type_selection(config)
 
-    # Model Selection
+
+def _render_model_selection(config: dict[str, Any]) -> None:
     st.markdown("### Model Selection")
 
     use_trained_model = st.checkbox(
@@ -201,45 +201,8 @@ def render_model_and_training_settings():
     )
 
     if use_trained_model:
-        # Checkpoint selection
-        checkpoint_files = st.session_state.viz_config_manager.get_checkpoint_files()
-
-        if checkpoint_files:
-            current_checkpoint = config.get("checkpoint_path", "")
-
-            # Try to find current checkpoint in list
-            checkpoint_index = 0
-            if current_checkpoint and current_checkpoint in checkpoint_files:
-                checkpoint_index = checkpoint_files.index(current_checkpoint)
-
-            selected_checkpoint = st.selectbox(
-                "Model Checkpoint:",
-                ["None"] + checkpoint_files,
-                index=checkpoint_index + 1 if current_checkpoint else 0,
-                help="Select a trained model checkpoint file",
-            )
-
-            if selected_checkpoint != "None":
-                config["checkpoint_path"] = selected_checkpoint
-                st.success(f"✓ Using checkpoint: {selected_checkpoint}")
-            else:
-                config["checkpoint_path"] = None
-        else:
-            st.warning(
-                "No checkpoint files found. Please train a model first or place checkpoint files in models/, outputs/, or checkpoints/ directories."
-            )
-            config["checkpoint_path"] = None
-
-        # Model config override (optional)
-        st.markdown("#### Model Config Override (Optional)")
-        custom_model_config = st.text_input(
-            "Model Config Path:",
-            value=config.get("model_config_path", "") or "",
-            placeholder="Leave empty to use default model config",
-            help="Optional path to override model configuration",
-        )
-
-        config["model_config_path"] = custom_model_config if custom_model_config else None
+        _render_checkpoint_selection(config)
+        _render_model_config_override(config)
     else:
         config["checkpoint_path"] = None
         config["model_config_path"] = None
@@ -247,7 +210,45 @@ def render_model_and_training_settings():
             "**Random Actions Mode**: The visualization will use random actions instead of a trained model."
         )
 
-    # Training Configuration
+
+def _render_checkpoint_selection(config: dict[str, Any]) -> None:
+    checkpoint_files = st.session_state.viz_config_manager.get_checkpoint_files()
+    if not checkpoint_files:
+        st.warning(
+            "No checkpoint files found. Please train a model first or place checkpoint files in models/, outputs/, or checkpoints/ directories."
+        )
+        config["checkpoint_path"] = None
+        return
+
+    current_checkpoint = config.get("checkpoint_path", "")
+    checkpoint_index = 0
+    if current_checkpoint and current_checkpoint in checkpoint_files:
+        checkpoint_index = checkpoint_files.index(current_checkpoint)
+
+    selected_checkpoint = st.selectbox(
+        "Model Checkpoint:",
+        ["None"] + checkpoint_files,
+        index=checkpoint_index + 1 if current_checkpoint else 0,
+        help="Select a trained model checkpoint file",
+    )
+    config["checkpoint_path"] = None if selected_checkpoint == "None" else selected_checkpoint
+
+    if config["checkpoint_path"] is not None:
+        st.success(f"✓ Using checkpoint: {selected_checkpoint}")
+
+
+def _render_model_config_override(config: dict[str, Any]) -> None:
+    st.markdown("#### Model Config Override (Optional)")
+    custom_model_config = st.text_input(
+        "Model Config Path:",
+        value=config.get("model_config_path", "") or "",
+        placeholder="Leave empty to use default model config",
+        help="Optional path to override model configuration",
+    )
+    config["model_config_path"] = custom_model_config if custom_model_config else None
+
+
+def _render_training_config_selection(config: dict[str, Any]) -> None:
     st.markdown("### Training Configuration")
     st.info(
         "Select the training configuration that matches your model (or desired environment setup for random actions)."
@@ -257,65 +258,71 @@ def render_model_and_training_settings():
     training_config_names = [Path(f).name for f in training_configs]
 
     if training_config_names:
-        current_train_config = config.get("train_config_path", "configs/training/basic.yaml")
-        current_name = Path(current_train_config).name if current_train_config else ""
-
-        # Try to find current config in list
-        train_config_index = 0
-        if current_name and current_name in training_config_names:
-            train_config_index = training_config_names.index(current_name)
-
-        selected_train_config_name = st.selectbox(
-            "Training Configuration:",
+        selected_train_config_name = _select_training_config_name(
+            config,
             training_config_names,
-            index=train_config_index,
-            help="Training configuration that matches your model",
         )
-
-        # Find the full path
         selected_train_config_path = next(
             f for f in training_configs if Path(f).name == selected_train_config_name
         )
         config["train_config_path"] = selected_train_config_path
-
         st.success(f"✓ Using training config: {selected_train_config_name}")
+        _render_training_config_summary(selected_train_config_path)
+        return
 
-        # Display config info
-        with st.expander("Training Config Summary"):
-            try:
-                train_cfg = st.session_state.viz_config_manager.load_config(
-                    selected_train_config_path
-                )
+    st.warning("No training configurations found in `configs/training/`.")
+    config["train_config_path"] = st.text_input(
+        "Training Config Path:",
+        value=config.get("train_config_path", ""),
+        placeholder="configs/training/basic.yaml",
+    )
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Environment Settings:**")
-                    env_cfg = train_cfg.get("env", {})
-                    st.write(f"- Agents per side: {env_cfg.get('num_agents_per_side', 'N/A')}")
-                    st.write(f"- Map size: {env_cfg.get('map_size', 'N/A')} km")
-                    st.write(f"- Max steps: {env_cfg.get('max_steps', 'N/A')}")
 
-                with col2:
-                    st.markdown("**Model Settings:**")
-                    model_cfg = train_cfg.get("model", {}).get("model_config", {})
-                    st.write(
-                        f"- Neural wrapper: {train_cfg.get('model', {}).get('use_neural_wrapper', 'N/A')}"
-                    )
-                    st.write(f"- Hidden dim: {model_cfg.get('hidden_dim', 'N/A')}")
-                    st.write(f"- Hidden layers: {model_cfg.get('num_hidden_layers', 'N/A')}")
+def _select_training_config_name(
+    config: dict[str, Any],
+    training_config_names: list[str],
+) -> str:
+    current_train_config = config.get("train_config_path", "configs/training/basic.yaml")
+    current_name = Path(current_train_config).name if current_train_config else ""
+    train_config_index = 0
+    if current_name and current_name in training_config_names:
+        train_config_index = training_config_names.index(current_name)
 
-            except Exception as e:
-                st.error(f"Error reading training config: {e}")
-    else:
-        st.warning("No training configurations found in `configs/training/`.")
-        custom_train_config = st.text_input(
-            "Training Config Path:",
-            value=config.get("train_config_path", ""),
-            placeholder="configs/training/basic.yaml",
-        )
-        config["train_config_path"] = custom_train_config
+    return st.selectbox(
+        "Training Configuration:",
+        training_config_names,
+        index=train_config_index,
+        help="Training configuration that matches your model",
+    )
 
-    # Environment Type
+
+def _render_training_config_summary(selected_train_config_path: str) -> None:
+    with st.expander("Training Config Summary"):
+        try:
+            train_cfg = st.session_state.viz_config_manager.load_config(selected_train_config_path)
+        except Exception as e:
+            st.error(f"Error reading training config: {e}")
+            return
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Environment Settings:**")
+            env_cfg = train_cfg.get("env", {})
+            st.write(f"- Agents per side: {env_cfg.get('num_agents_per_side', 'N/A')}")
+            st.write(f"- Map size: {env_cfg.get('map_size', 'N/A')} km")
+            st.write(f"- Max steps: {env_cfg.get('max_steps', 'N/A')}")
+
+        with col2:
+            st.markdown("**Model Settings:**")
+            model_cfg = train_cfg.get("model", {}).get("model_config", {})
+            st.write(
+                f"- Neural wrapper: {train_cfg.get('model', {}).get('use_neural_wrapper', 'N/A')}"
+            )
+            st.write(f"- Hidden dim: {model_cfg.get('hidden_dim', 'N/A')}")
+            st.write(f"- Hidden layers: {model_cfg.get('num_hidden_layers', 'N/A')}")
+
+
+def _render_environment_type_selection(config: dict[str, Any]) -> None:
     st.markdown("### Environment Type")
     env_types = ["simplified", "bvr"]
     current_env_type = config.get("env_type", "simplified")
@@ -352,7 +359,17 @@ def render_visualization_settings():
         },
     )
 
-    # Scenario overlay
+    _render_scenario_overlay_settings(config, overlay_config)
+    _render_simulation_settings(viz_config)
+    _render_visual_symbol_settings(viz_config)
+    _render_recording_settings(viz_config)
+    _render_visualization_config_preview(config)
+
+
+def _render_scenario_overlay_settings(
+    config: dict[str, Any],
+    overlay_config: dict[str, Any],
+) -> None:
     st.markdown("### Scenario Overlay")
     scenario_options = list_visualization_scenarios()
     scenario_labels = [scenario.label for scenario in scenario_options]
@@ -407,7 +424,8 @@ def render_visualization_settings():
         mode for mode in overlay_modes if overlay_labels[mode] == selected_map_mode_label
     )
 
-    # Simulation Settings
+
+def _render_simulation_settings(viz_config: dict[str, Any]) -> None:
     st.markdown("### Simulation Settings")
     col1, col2 = st.columns(2)
 
@@ -440,7 +458,8 @@ def render_visualization_settings():
         else:
             st.info(f"⚡ Fixed interval: {viz_config['interval']}ms between frames")
 
-    # Visual Settings
+
+def _render_visual_symbol_settings(viz_config: dict[str, Any]) -> None:
     st.markdown("### Visual Settings")
     col1, col2 = st.columns(2)
 
@@ -485,7 +504,8 @@ def render_visualization_settings():
         else:
             st.error("🐌 Slow rendering, best quality")
 
-    # Recording Settings
+
+def _render_recording_settings(viz_config: dict[str, Any]) -> None:
     st.markdown("### Recording & Export Settings")
     col1, col2 = st.columns(2)
 
@@ -509,7 +529,8 @@ def render_visualization_settings():
         if viz_config["save_rewards"]:
             st.info("Reward data will be saved for analysis.")
 
-    # Preview Settings
+
+def _render_visualization_config_preview(config: dict[str, Any]) -> None:
     st.markdown("### Configuration Preview")
     with st.expander("Current Configuration"):
         st.json(config)
@@ -519,7 +540,6 @@ def render_viz_config_comparison():
     """Render visualization configuration comparison interface."""
     st.subheader("Configuration Comparison")
 
-    # Load configurations for comparison
     existing_configs = st.session_state.viz_config_manager.get_existing_configs()
     config_names = [Path(f).name for f in existing_configs]
 
@@ -527,7 +547,6 @@ def render_viz_config_comparison():
         st.warning("You need at least 2 saved visualization configurations to compare.")
         return
 
-    # Select configurations to compare
     col1, col2 = st.columns(2)
 
     with col1:
@@ -541,16 +560,13 @@ def render_viz_config_comparison():
         )
 
     if st.button("Compare Configurations"):
-        # Load both configurations
         config1_path = next(f for f in existing_configs if Path(f).name == config1_name)
         config2_path = next(f for f in existing_configs if Path(f).name == config2_name)
 
         config1 = st.session_state.viz_config_manager.load_config(config1_path)
         config2 = st.session_state.viz_config_manager.load_config(config2_path)
 
-        # Compare configurations
         st.markdown("### Configuration Differences")
-
         differences = find_viz_config_differences(config1, config2)
 
         if not differences:
@@ -575,41 +591,13 @@ def find_viz_config_differences(
     config1: dict[str, Any], config2: dict[str, Any]
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """Find differences between two visualization configurations."""
-    differences = {}
-
-    def compare_section(section_name: str, section1: Any, section2: Any, path: str = ""):
-        if section_name not in differences:
-            differences[section_name] = {}
-
-        if isinstance(section1, dict) and isinstance(section2, dict):
-            # Compare dictionaries recursively
-            all_keys = set(section1.keys()) | set(section2.keys())
-            for key in all_keys:
-                key_path = f"{path}.{key}" if path else key
-                val1 = section1.get(key, "NOT_SET")
-                val2 = section2.get(key, "NOT_SET")
-
-                if isinstance(val1, dict) and isinstance(val2, dict):
-                    compare_section(section_name, val1, val2, key_path)
-                elif val1 != val2:
-                    differences[section_name][key_path] = {"config1": val1, "config2": val2}
-        elif section1 != section2:
-            differences[section_name][path or section_name] = {
-                "config1": section1,
-                "config2": section2,
-            }
-
-    # Compare main sections
+    sections = []
     for key in config1.keys() | config2.keys():
         if key == "visualization":
-            compare_section("visualization", config1.get(key, {}), config2.get(key, {}))
+            sections.append(("visualization", config1.get(key, {}), config2.get(key, {}), ""))
         else:
-            compare_section("general", config1.get(key), config2.get(key), key)
-
-    # Remove empty sections
-    differences = {k: v for k, v in differences.items() if v}
-
-    return differences
+            sections.append(("general", config1.get(key), config2.get(key), key))
+    return collect_config_differences(sections)
 
 
 if __name__ == "__main__":

@@ -12,14 +12,16 @@ This package contains the refactored components of BVRMultiAgentEnv:
 - reward_config: Reward calculator configuration helper
 """
 
-from .config import BVREnvConfig
-from .episode_manager import EpisodeManager
-from .helpers import AgentHelpers
-from .observation_builder import ObservationInfoBuilder
-from .reward_config import create_reward_calculator
-from .state_tracker import StateTracker
-from .step_processor import StepProcessor
-from .termination import TerminationChecker
+from bvr_marl_core.rl.environment.gym.gym_components.config import BVREnvConfig
+from bvr_marl_core.rl.environment.gym.gym_components.episode_manager import EpisodeManager
+from bvr_marl_core.rl.environment.gym.gym_components.helpers import AgentHelpers
+from bvr_marl_core.rl.environment.gym.gym_components.observation_builder import (
+    ObservationInfoBuilder,
+)
+from bvr_marl_core.rl.environment.gym.gym_components.reward_config import create_reward_calculator
+from bvr_marl_core.rl.environment.gym.gym_components.state_tracker import StateTracker
+from bvr_marl_core.rl.environment.gym.gym_components.step_processor import StepProcessor
+from bvr_marl_core.rl.environment.gym.gym_components.termination import TerminationChecker
 
 __all__ = [
     "BVREnvConfig",

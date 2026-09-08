@@ -1,5 +1,6 @@
-import numpy as np
+import math
 
+from bvr_marl_core.missiles.core.tracker_info import build_tracker_info
 from bvr_marl_core.simulator.utils.angles import signed_yaw_deg_diff
 from bvr_marl_core.simulator.utils.geodesics import geodetic_bearing_deg
 
@@ -60,31 +61,24 @@ class SemiActiveRadarSeeker:
         G0 = 10.0 ** (25.0 / 10.0)
         sigma0 = 1.0
         ratio = (Pt * (G**2) * sigma_m2) / (Pt0 * (G0**2) * sigma0)
-        return float(np.clip(ratio**0.25, 0.5, 1.7))
+        return min(max(ratio**0.25, 0.5), 1.7)
 
     def _calculate_distance(self, pos1, pos2) -> float:
         R_earth = 6_371_000.0
-        deg2rad = np.pi / 180.0
+        deg2rad = math.pi / 180.0
 
         dlat = (pos2.lat - pos1.lat) * deg2rad
         dlon = (pos2.lon - pos1.lon) * deg2rad
         lat_avg = 0.5 * (pos1.lat + pos2.lat) * deg2rad
 
-        dx = R_earth * dlon * np.cos(lat_avg)
+        dx = R_earth * dlon * math.cos(lat_avg)
         dy = R_earth * dlat
         dz = pos2.alt - pos1.alt
 
-        return float(np.sqrt(dx * dx + dy * dy + dz * dz))
+        return math.sqrt(dx * dx + dy * dy + dz * dz)
 
     def _update_tracker_info(self, target):
-        self._tracker_info = {
-            "position": [target.position.lat, target.position.lon, target.position.alt],
-            "velocity": [
-                getattr(target, "velocity_x", 0.0),
-                getattr(target, "velocity_y", 0.0),
-                getattr(target, "velocity_z", 0.0),
-            ],
-        }
+        self._tracker_info = build_tracker_info(target)
 
     def get_locked_target(self):
         return getattr(self.locked_target, "id", None) if self.locked_target else None

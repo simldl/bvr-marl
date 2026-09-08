@@ -20,17 +20,19 @@ from bvr_marl_core.simulator import MapLimits, Simulator
 from bvr_marl_core.tacview.logger import TacviewLogger
 from bvr_marl_core.utils.config_loader import load_train_config
 from bvr_marl_core.utils.paths import tacview_output_root
+from bvr_marl_core.visualization.model_wrapper.inference_output import deterministic_actions
 from bvr_marl_core.visualization.model_wrapper.policy_selection import resolve_policy_id
 
 
 class DefaultModel:
     """Default model that returns random actions."""
 
-    def __init__(self, env):
+    def __init__(self, env, seed=None):
         self.env = env
+        self._rng = np.random.default_rng(seed)
 
     def compute_single_action(self, observation, agent_id):
-        return np.random.rand(10).astype(np.float32)
+        return self._rng.random(10, dtype=np.float32)
 
 
 class TrainedModelWrapper:
@@ -155,46 +157,7 @@ class TrainedModelWrapper:
         if Columns.STATE_OUT in output:
             self._states[state_key] = output[Columns.STATE_OUT]
 
-        # Extract actions from output
-        if Columns.ACTIONS in output:
-            # Standard action output
-            actions = output[Columns.ACTIONS]
-            # Handle both (batch, action_dim) and (batch, time, action_dim) shapes
-            if actions.dim() == 3:
-                actions = actions[0, 0]  # Remove batch and time dimensions
-            else:
-                actions = actions[0]  # Remove batch dimension only
-        elif "actions" in output:
-            # Fallback: lowercase actions
-            actions = output["actions"]
-            if actions.dim() == 3:
-                actions = actions[0, 0]
-            else:
-                actions = actions[0]
-        elif Columns.ACTION_DIST_INPUTS in output:
-            # Distribution parameters - extract means
-            action_dist_inputs = output[Columns.ACTION_DIST_INPUTS]
-            # Handle both (batch, dist_params) and (batch, time, dist_params) shapes
-            if action_dist_inputs.dim() == 3:
-                action_dist_inputs = action_dist_inputs[0, 0]
-            else:
-                action_dist_inputs = action_dist_inputs[0]
-            # Extract just the means (first half) for deterministic behavior
-            action_dim = action_dist_inputs.shape[0] // 2
-            actions = action_dist_inputs[:action_dim]
-        elif "action_dist_inputs" in output:
-            # Fallback: lowercase
-            action_dist_inputs = output["action_dist_inputs"]
-            if action_dist_inputs.dim() == 3:
-                action_dist_inputs = action_dist_inputs[0, 0]
-            else:
-                action_dist_inputs = action_dist_inputs[0]
-            action_dim = action_dist_inputs.shape[0] // 2
-            actions = action_dist_inputs[:action_dim]
-        else:
-            raise ValueError(
-                f"Unexpected output format from forward_inference. Keys: {list(output.keys())}"
-            )
+        actions = deterministic_actions(output, Columns)
 
         # Convert from torch tensor to numpy if needed
         if hasattr(actions, "cpu"):
@@ -202,7 +165,7 @@ class TrainedModelWrapper:
         elif hasattr(actions, "numpy"):
             actions = actions.numpy()
 
-        # CRITICAL: Clip actions to [0,1] to match training behavior
+        # Match the normalized training-time action contract.
         actions = np.clip(actions, 0.0, 1.0)
 
         return actions
@@ -414,7 +377,7 @@ def run_tacview_scenario(
             model_to_return = model
         else:
             print("No checkpoint provided - using random actions")
-            model = DefaultModel(env)
+            model = DefaultModel(env, seed=seed)
     else:
         print("Reusing pre-loaded model from previous scenario...")
         model_to_return = model

@@ -4,21 +4,16 @@ BVR-MARL GUI launcher — starts the Streamlit-based control panel.
 """
 
 import argparse
+import importlib.util
 import subprocess
 import sys
-from pathlib import Path
 
 from bvr_marl_core.utils.paths import gui_app as _gui_app_path
 
 
 def check_streamlit():
     """Check if streamlit is installed."""
-    try:
-        import streamlit
-
-        return True
-    except ImportError:
-        return False
+    return importlib.util.find_spec("streamlit") is not None
 
 
 def install_streamlit():
