@@ -64,6 +64,7 @@ of the critic's ~11,000x one.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Hashable
 from typing import Any
 
@@ -97,10 +98,95 @@ The stock ``gradients_default_optimizer_global_norm`` reports their combination,
 is why the actor being rescaled by the critic was invisible for so long."""
 
 
+ADAPTIVE = "adaptive"
+"""``policy_grad_clip: adaptive`` -- track the actor's own norm instead of guessing it.
+
+A CONSTANT actor bound cannot work, and the follow-on to the measurement in the module
+docstring is why. ``policy_grad_clip: 10.0`` was calibrated on the 30-iteration smoke run
+quoted below, where the actor norm was 16-318. Over 650 real iterations of
+a self-play run it was:
+
+    |g|policy   median 669   p90 3087   max 23730   -> clip factor 4.2e-04 .. 0.71
+
+    band          mean_kl median     mean_kl EXACTLY 0.0
+    it   0- 50       5.4e-04             0/50
+    it 150-300       3.0e-05             0/150
+    it 300-450       3.9e-07            31/150
+    it 450-650       0.00e+00          117/200
+
+So the bound was ~65x too tight and reproduced the original pathology one level down --
+`mean_kl` of exactly 0.0 means the updated policy is bit-identical to the sampling one.
+Two further facts a single constant cannot accommodate:
+
+* the norm GROWS by orders of magnitude as training proceeds, so any value calibrated
+  early is wrong later;
+* it differs ~30x BETWEEN the two self-play policies at the same iteration (attacker
+  median 646, defender 58), and whichever one is large gets clipped into a null update
+  while its opponent trains freely. Only one policy freezes at a time and which one it
+  is flips between runs -- that is how self-play silently became one-sided.
+
+Adaptive mode keeps a geometric running mean of the actor's own norm, per module, and
+bounds it at ``policy_grad_clip_multiplier`` times that. Two properties follow:
+
+* the factor is 1.0 (no clipping at all) on the ordinary majority of steps, so Adam's
+  scale-invariance actually holds and only genuine outlier spikes are rescaled;
+* the reference is per-module and moves with training, so neither the 30x asymmetry nor
+  the growth over 650 iterations can strand it.
+
+Geometric, not arithmetic: these norms are heavy-tailed over orders of magnitude
+(median 669, max 23730), so a plain mean is dragged around by the spikes it exists to
+catch. The EMA runs on ``log(norm)``.
+"""
+
+DEFAULT_ADAPTIVE_MULTIPLIER = 3.0
+"""Bound = this times the running geometric mean of the actor's norm.
+
+At the measured distribution (median 669) this puts the bound near 2000: the p90 of 3087
+is scaled by 0.65 and the 23730 spike by 0.084, leaving a ~12x factor spread instead of
+700x, and everything at or below the typical norm passes through untouched."""
+
+DEFAULT_ADAPTIVE_EMA = 0.01
+"""Weight on each new observation, i.e. a ~100-iteration horizon.
+
+Slow enough that one batch cannot move the bound it is about to be clipped by -- which
+would make the clip self-fulfilling -- and fast enough to follow the order-of-magnitude
+growth seen across a real stage."""
+
+ADAPTIVE_BOUND_KEY = "gradients_policy_adaptive_bound"
+"""The bound actually applied this iteration. Logged so a run records the schedule it
+chose rather than leaving it to be inferred from the norm."""
+
+MULTIPLIER_KEY = "policy_grad_clip_multiplier"
+EMA_KEY = "policy_grad_clip_ema"
+
+
+def _learner_cfg(config: PPOConfig) -> dict:
+    return getattr(config, "learner_config_dict", None) or {}
+
+
+def _is_adaptive(config: PPOConfig) -> bool:
+    raw = _learner_cfg(config).get(POLICY_GRAD_CLIP_KEY)
+    return isinstance(raw, str) and raw.strip().lower() == ADAPTIVE
+
+
+def _positive(config: PPOConfig, key: str, default: float) -> float:
+    try:
+        value = float(_learner_cfg(config).get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0.0 else default
+
+
 def _bound(config: PPOConfig, key: str) -> float | None:
-    raw = (getattr(config, "learner_config_dict", None) or {}).get(key)
+    raw = _learner_cfg(config).get(key)
     if raw is None:
         return None
+    if isinstance(raw, str):
+        # "adaptive" is resolved per module in postprocess_gradients_for_module; any
+        # other string is a config error and must not silently disable the bound.
+        if raw.strip().lower() == ADAPTIVE:
+            return None
+        raise ValueError(f"{key}: expected a positive number, null, or {ADAPTIVE!r}; got {raw!r}")
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -114,6 +200,50 @@ class DecoupledGradClipPPOTorchLearner(CriticWarmupPPOTorchLearner):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._decoupled_policy_params: dict[ModuleID, set[int]] = {}
+        # Per-module geometric running mean of the actor's UNCLIPPED norm, as log(norm).
+        self._policy_norm_log_ema: dict[ModuleID, float] = {}
+
+    def _adaptive_policy_bound(
+        self, module_id: ModuleID, observed_norm: float, config: PPOConfig
+    ) -> float | None:
+        """Bound for this module this iteration, from its own norm history.
+
+        Updated with the norm as OBSERVED BEFORE clipping, so the reference tracks what
+        the actor's gradient actually is rather than what the previous bound left of it --
+        a bound fed its own clipped output would ratchet itself down to nothing, which is
+        the failure being fixed.
+        """
+        if not (observed_norm > 0.0) or not math.isfinite(observed_norm):
+            # A zero/NaN norm carries no scale information. Keep the current reference.
+            previous = self._policy_norm_log_ema.get(module_id)
+            if previous is None:
+                return None
+            return math.exp(previous) * _positive(
+                config, MULTIPLIER_KEY, DEFAULT_ADAPTIVE_MULTIPLIER
+            )
+
+        alpha = min(max(_positive(config, EMA_KEY, DEFAULT_ADAPTIVE_EMA), 0.0), 1.0)
+        log_norm = math.log(observed_norm)
+        previous = self._policy_norm_log_ema.get(module_id)
+        # Seed from the first observation rather than from 0.0 (norm 1.0), which would
+        # otherwise take a whole horizon to walk up to a norm in the hundreds while
+        # clipping everything to ~3.0 in the meantime.
+        updated = log_norm if previous is None else (1.0 - alpha) * previous + alpha * log_norm
+        self._policy_norm_log_ema[module_id] = updated
+        return math.exp(updated) * _positive(config, MULTIPLIER_KEY, DEFAULT_ADAPTIVE_MULTIPLIER)
+
+    @staticmethod
+    def _global_norm(grads: dict[Hashable, Any]) -> float:
+        """L2 norm over every gradient tensor, matching RLlib's global_norm convention."""
+        total = 0.0
+        for grad in grads.values():
+            if grad is None:
+                continue
+            try:
+                total += float(grad.detach().norm(2).item() ** 2)
+            except Exception:
+                continue
+        return math.sqrt(total)
 
     def _policy_param_ids(self, module_id: ModuleID) -> set[int]:
         """Identity set of the parameters that are NOT the value function.
@@ -141,8 +271,9 @@ class DecoupledGradClipPPOTorchLearner(CriticWarmupPPOTorchLearner):
         config: PPOConfig | None = None,
         module_gradients_dict: dict[Hashable, Any],
     ) -> dict[Hashable, Any]:
+        adaptive = config is not None and _is_adaptive(config)
         policy_clip = _bound(config, POLICY_GRAD_CLIP_KEY) if config is not None else None
-        if config is None or policy_clip is None:
+        if config is None or (policy_clip is None and not adaptive):
             # Not configured: behave exactly like the parent.
             return super().postprocess_gradients_for_module(
                 module_id=module_id,
@@ -177,6 +308,13 @@ class DecoupledGradClipPPOTorchLearner(CriticWarmupPPOTorchLearner):
 
         policy_grads = {p: g for p, g in module_gradients_dict.items() if id(p) in policy_ids}
         value_grads = {p: g for p, g in module_gradients_dict.items() if id(p) not in policy_ids}
+
+        if adaptive and policy_grads:
+            # Measure BEFORE clipping: the reference must track the actor's real gradient.
+            observed = self._global_norm(policy_grads)
+            policy_clip = self._adaptive_policy_bound(module_id, observed, config)
+            if policy_clip is not None:
+                self.metrics.log_value((module_id, ADAPTIVE_BOUND_KEY), policy_clip, window=1)
 
         clip = self._get_clip_function()
         for grads, bound, metric_key in (

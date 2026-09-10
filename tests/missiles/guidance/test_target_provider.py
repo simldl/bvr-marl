@@ -615,3 +615,55 @@ class TestNormalizedTrackUncertainty:
         assert _normalized_track_uncertainty(np.full((3, 3), np.nan)) is None
         # A too-small matrix has no position block to read.
         assert _normalized_track_uncertainty(np.eye(2)) is None
+
+
+def test_reassociation_considers_non_engageable_seeker_tracks():
+    """A committed weapon must re-associate onto a coasting or freshly-initiated return.
+
+    `engageable` requires `lifecycle in {CONFIRMED, REACQUIRED}`. In the endgame the
+    seeker's track is repeatedly dropped and re-initiated -- measured in BT-vs-BT, ids
+    33->34->35->36->37->38 inside 7 km, each restarting at lifetime_s 2.0, then holding
+    at `coasting` for the final ~2.5 km. Filtering to engageable BEFORE re-association
+    therefore left it with nothing to match, and the weapon dead-reckoned the part of the
+    flight where precision matters most.
+
+    `engageable` is the right gate for choosing what to SHOOT AT; it is the wrong gate
+    for identifying the target a weapon is already prosecuting. The 2 km spatial gate is
+    what bounds this one.
+    """
+    from types import SimpleNamespace
+
+    from bvr_marl_core.missiles.guidance.target_provider import GuidanceTargetProvider
+    from bvr_marl_core.simulator.core.helpers import Position
+
+    provider = object.__new__(GuidanceTargetProvider)
+    provider.missile = SimpleNamespace(position=Position(0.0, 0.0, 9_000.0))
+    anchor = Position(0.0, 0.0, 9_000.0)
+    provider.last_confirmed_target_pos = anchor
+
+    def _track(track_id, *, engageable, offset_deg):
+        return SimpleNamespace(
+            track_id=track_id,
+            engageable=engageable,
+            reference_frame=None,
+            state=(offset_deg * 111_000.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        )
+
+    # Stand in for the frame/state conversion so the test exercises the GATE, not the
+    # projection maths (which has its own coverage).
+    provider._position_reference = lambda ref, own: anchor
+    provider._state_to_position = lambda state, ref: Position(
+        anchor.lat + state[0] / 111_000.0, anchor.lon, anchor.alt
+    )
+
+    inside_gate = 0.5 * GuidanceTargetProvider.REASSOCIATION_GATE_M / 111_000.0
+    coasting = _track(31, engageable=False, offset_deg=inside_gate)
+
+    assert provider._reassociate_seeker_tracks([coasting]) == [coasting], (
+        "a non-engageable return inside the gate is the cued target, seen by a seeker "
+        "that has not finished promoting it"
+    )
+
+    # The no-wander guarantee is the SPATIAL gate, and it must still hold.
+    outside = _track(32, engageable=False, offset_deg=3.0 * inside_gate)
+    assert provider._reassociate_seeker_tracks([outside]) == []

@@ -321,8 +321,13 @@ class ObservationHelper:
         if not target:
             return NO_TARGET_GATES.as_dict()
 
+        # The saturation cap is configurable, and the launch path passes the configured
+        # value. Read it off the mirror `sync_designated_contact` publishes so this path
+        # cannot silently fall back to a different cap than the gate it is predicting.
+        cap = getattr(self.aircraft, "max_missiles_per_target", None)
+        kwargs = {} if cap is None else {"max_missiles_per_target": int(cap)}
         return evaluate_fire_gates(
-            self.aircraft, target, simulator=simulator, obs_helper=self
+            self.aircraft, target, simulator=simulator, obs_helper=self, **kwargs
         ).as_dict()
 
     def get_lock_quality(self, target) -> dict[str, Any]:

@@ -13,6 +13,7 @@ from bvr_marl_core.rl.training.critic_warmup_learner import (
     DEFAULT_CRITIC_WARMUP_ITERATIONS,
 )
 from bvr_marl_core.rl.training.decoupled_grad_clip_learner import (
+    ADAPTIVE,
     POLICY_GRAD_CLIP_KEY,
     VALUE_GRAD_CLIP_KEY,
     DecoupledGradClipPPOTorchLearner,
@@ -94,22 +95,48 @@ DEFAULT_GRAD_CLIP = 0.5
 # former (its `m`/`v` averages stay comparable across steps); the latter is what
 # collapsed `mean_kl` by five orders of magnitude.
 #
-# 10.0 is therefore an empirical setting, not a principled ceiling. It produces a healthy
-# `mean_kl` an order of magnitude below `kl_target`, so there is room to raise it if the
-# policy turns out to move too slowly -- watch `mean_kl_loss` against `kl_target` rather
-# than reasoning about the norm.
-DEFAULT_POLICY_GRAD_CLIP = 10.0
+# 10.0 was an empirical setting from that smoke run, and the smoke run was too short to
+# calibrate anything. THAT IS THE BUG: over 650 real iterations of
+# a self-play run the actor norm ran median 669 / p90 3087 / max 23730, so
+# 10.0 was ~65x too tight, and `mean_kl` decayed to EXACTLY 0.0 on 117 of the last 200
+# iterations -- a policy bit-identical to the one that sampled the batch. The bound also
+# has to serve two self-play policies whose norms differ ~30x at the same iteration
+# (attacker median 646, defender 58), so whichever is larger froze while its opponent
+# trained on. No constant can satisfy all of that.
+#
+# The default is therefore ADAPTIVE: bound the actor at a multiple of a per-module running
+# geometric mean of its own norm, so the reference follows both the growth over a stage and
+# the asymmetry between policies, and ordinary steps are not clipped at all. See
+# `decoupled_grad_clip_learner.ADAPTIVE`.
+#
+# Never calibrate a clip bound on a short run: the norm grows by orders of magnitude as
+# training proceeds. Watch `mean_kl_loss` against `kl_target`, not the norm.
+DEFAULT_POLICY_GRAD_CLIP = ADAPTIVE
+
+#: Fixed bound kept only so an old run can be reproduced exactly; see above for why it
+#: cannot work as a default.
+LEGACY_FIXED_POLICY_GRAD_CLIP = 10.0
 
 
-def _policy_grad_clip(training_cfg: dict) -> float | None:
-    """Actor-side global-norm bound, or None to keep RLlib's single shared norm.
+def _policy_grad_clip(training_cfg: dict) -> float | str | None:
+    """Actor-side bound: ``"adaptive"``, a fixed number, or None for the shared norm.
 
     An explicit ``policy_grad_clip: null`` opts a config out (the two-norm split is a
-    behaviour change, so it must be possible to reproduce an old run exactly).
+    behaviour change, so it must be possible to reproduce an old run exactly). A number is
+    passed through unchanged for the same reason.
     """
     if "policy_grad_clip" in training_cfg:
         raw = training_cfg["policy_grad_clip"]
-        return None if raw is None else float(raw)
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            if raw.strip().lower() != ADAPTIVE:
+                raise ValueError(
+                    f"policy_grad_clip: expected a positive number, null, or {ADAPTIVE!r}; "
+                    f"got {raw!r}"
+                )
+            return ADAPTIVE
+        return float(raw)
     return DEFAULT_POLICY_GRAD_CLIP
 
 

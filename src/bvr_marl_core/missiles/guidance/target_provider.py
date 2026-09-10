@@ -705,7 +705,23 @@ class GuidanceTargetProvider:
                 # coasted estimate, keep the designated identity for reporting, and
                 # the no-wander guarantee still holds because a track outside the
                 # gate is still rejected.
-                matched = self._reassociate_seeker_tracks(candidates)
+                #
+                # Re-associate over ALL seeker tracks, not just the engageable ones.
+                # `engageable` requires `lifecycle in {CONFIRMED, REACQUIRED}`, and in
+                # the endgame the seeker's track is repeatedly dropped and re-initiated
+                # (measured in BT-vs-BT: ids 33->34->35->36->37->38 inside 7 km, each
+                # restarting at lifetime_s 2.0, then holding at `coasting` for the last
+                # ~2.5 km). Every one of those is non-engageable, so filtering first left
+                # re-association with nothing to match and the weapon dead-reckoned the
+                # part of the flight where precision matters most.
+                #
+                # `engageable` is the right gate for deciding what to SHOOT AT -- it
+                # exists to stop bearing-only triangulation ghosts becoming shootable.
+                # It is the wrong gate for deciding which return is the target already
+                # being prosecuted: that weapon is committed, and the 2 km spatial gate
+                # below is what bounds it. A fresh or coasting return inside that basket
+                # is the cued target seen by a seeker that has not finished promoting it.
+                matched = self._reassociate_seeker_tracks(tracks)
             candidates = matched
         elif locked_id is not None:
             locked = [track for track in candidates if track.track_id == locked_id]

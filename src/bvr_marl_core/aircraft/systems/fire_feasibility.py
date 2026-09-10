@@ -269,6 +269,39 @@ def sync_missile_cooldown(aircraft, cooldown_left_s: float) -> None:
         pass
 
 
+def sync_designated_contact(aircraft, contact, max_missiles_per_target: int) -> None:
+    """Publish the action-space's DESIGNATED contact where the observation path can read it.
+
+    Same mirror pattern, and same reason, as :func:`sync_missile_cooldown`: the target the
+    policy designated lives in the action-space state dict, which the aircraft cannot see.
+
+    Without it the two answers to "may I launch right now?" are computed against different
+    targets, which is the divergence this whole module exists to prevent:
+
+    * the launch path and ``tactical/shot_opportunities`` ask about ``selected_target`` --
+      the designated contact, datalink-cued locks accepted;
+    * the observation bit at ``own_state[OWN_IDX_CAN_FIRE]`` used to ask about the first
+      OWN-RADAR-locked contact instead, and additionally required ``contact.engageable``,
+      a track-state predicate (``{CONFIRMED, REACQUIRED}``) that the launch path never
+      applies.
+
+    Measured on a self-play run before this mirror existed: 99.0% of
+    steps held a lock but only 31.8% held one that was also ``engageable``, and the
+    observation bit was true on ~0.44 steps/episode against 187.8 counted shot
+    opportunities -- a ~430x gap. Because the fire-gradient mask keys off that bit, the
+    fire axis was pinned to P(fire)=0 on essentially every step where a shot was
+    available, so the policy could neither shoot nor learn to.
+
+    ``max_missiles_per_target`` rides along for the same reason: the observation path
+    otherwise falls back to the default cap while the launch path uses the configured one.
+    """
+    try:
+        aircraft.designated_contact = contact
+        aircraft.max_missiles_per_target = int(max_missiles_per_target)
+    except Exception:
+        pass
+
+
 def target_saturated(aircraft, target, simulator, max_missiles_per_target: int) -> bool:
     """Are there already ``max_missiles_per_target`` friendly missiles on this target?"""
     tid = _target_id(target)
@@ -403,9 +436,50 @@ def roe_engageable(target, *, aircraft=None, simulator=None) -> bool:
     return not bool(getattr(unit, "is_non_engageable", False))
 
 
-def _helper_of(aircraft):
+def helper_for(aircraft):
+    """The geometry helper for ``aircraft``, constructing one if it carries none.
+
+    Public because the observation builders need the SAME instance: cached on the unit,
+    it is reachable from both the launch path and the observation path and it dies with
+    the unit. Builders that keep their own ``{unit.id: helper}`` dict instead leak across
+    episodes -- unit ids repeat while unit objects are rebuilt, so from the second episode
+    on such a cache hands back a helper wrapping the previous episode's dead aircraft.
+
+    Returning None here is NOT a harmless "skip the optional geometry": every geometric
+    gate in :func:`evaluate_fire_gates` defaults to True, so a missing helper silently
+    turns ``gimbal_ok``, ``radar_range_ok`` and ``weapon_range_ok`` (the live DLZ) into
+    no-ops and the function reports a shot whose geometry was never examined.
+
+    Aircraft units carry no ``observation_helper`` attribute -- measured directly on a
+    stage-0 unit, ``_helper_of`` returned None on every step. So the LAUNCH path ran
+    without geometry while the OBSERVATION path passed its own helper explicitly and ran
+    with it. The two answers then differed by construction, in one direction:
+    ``tactical/shot_opportunities`` counted 10.3% of steps against an observation bit of
+    2.1% over 3781 steps of trained-policy rollout, and all 188 gate-level disagreements
+    were ``weapon_range_ok: launch=True obs=False`` -- opportunities outside the missile's
+    own DLZ, counted because nothing checked.
+
+    Constructing on demand (and caching on the unit) makes the helper unconditional, so
+    both call sites evaluate the same gates. The import is local: ``observation_helper``
+    imports this module.
+    """
     for attr in ("observation_helper", "obs_helper"):
         helper = getattr(aircraft, attr, None)
         if helper is not None and hasattr(helper, "get_geometry_kinematics"):
             return helper
-    return None
+    if aircraft is None:
+        return None
+    try:
+        from bvr_marl_core.aircraft.systems.observation_helper import ObservationHelper
+
+        helper = ObservationHelper(aircraft)
+        aircraft.observation_helper = helper
+        return helper
+    except Exception:
+        # A test double that cannot host the attribute keeps the previous permissive
+        # behaviour rather than failing a gate evaluation outright.
+        return None
+
+
+#: Back-compat alias for the private name this used to have.
+_helper_of = helper_for

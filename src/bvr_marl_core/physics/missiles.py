@@ -5,6 +5,36 @@ from dataclasses import dataclass, field
 from bvr_marl_core.physics.flying_objects import FlyingPhysics
 from bvr_marl_core.physics.physics import PhysicsParams, get_speed_of_sound
 
+# Design point at which a missile is expected to be able to pull its rated `n_max`:
+# a fraction of its own top speed, at a representative engagement altitude. Used only to
+# size a DEFAULT lift reference area when a missile does not declare one.
+#
+# The point of anchoring to `n_max` rather than hardcoding a fin planform per weapon is
+# that every missile already declares the load factor it is supposed to achieve, and that
+# number was previously unreachable -- the AMRAAM's `n_max: 40` resolved to 5.4 g of real
+# aerodynamic capability. Deriving the area from the declared value makes the declaration
+# mean what it says at the design point, and honestly less of it when slow or high.
+LIFT_AREA_DESIGN_SPEED_FRACTION = 0.85
+LIFT_AREA_DESIGN_ALT_M = 9_000.0
+
+
+def default_lift_reference_area_m2(
+    *, n_max: float, mass_kg: float, max_speed_mps: float, gravity: float, air, ca_max_fn
+) -> float:
+    """Lift reference area that lets this missile reach ``n_max`` at the design point.
+
+    A missile's normal force comes from its fins, not from the body cross-section that
+    sets its drag, so the two reference areas are different physical quantities. Returns
+    the drag-area-equivalent that closes ``n = 0.5*rho*v^2*S*CA_max/W`` at ``n_max``.
+    """
+    v = max(1.0, float(max_speed_mps) * LIFT_AREA_DESIGN_SPEED_FRACTION)
+    rho = float(air.get_density(LIFT_AREA_DESIGN_ALT_M))
+    ca = float(ca_max_fn(v, LIFT_AREA_DESIGN_ALT_M))
+    q = 0.5 * rho * v * v
+    if q <= 0.0 or ca <= 0.0:
+        return 0.0
+    return float(n_max) * float(mass_kg) * float(gravity) / (q * ca)
+
 
 class MissilePhysics(FlyingPhysics):
     @dataclass
@@ -35,6 +65,24 @@ class MissilePhysics(FlyingPhysics):
 
     def __init__(self, params: Params):
         super().__init__(params)
+        # Size the lift reference area from the declared `n_max` unless the weapon
+        # states its own. Done here rather than in the Params default because it needs
+        # `get_ca_max`, which is this class's own Mach-scheduled model.
+        if getattr(params, "lift_reference_area_m2", None) is None:
+            self.A_lift_m2 = default_lift_reference_area_m2(
+                n_max=self.n_max,
+                mass_kg=self.mass_kg,
+                max_speed_mps=self.max_speed,
+                gravity=self.g,
+                air=self.air,
+                ca_max_fn=self.get_ca_max,
+            )
+            # `super().__init__` already built the ForceModel from the pre-derived value,
+            # so it must be told. Leaving it stale gave the missile the new area for its
+            # TURN RATE while its INDUCED DRAG kept the old one -- lift and drag
+            # disagreeing about the same surface, which drained a Mach 3.5 weapon to
+            # 360 m/s in five seconds of hard turn.
+            self.force_model.A_lift_m2 = self.A_lift_m2
         self.cd0_s1 = params.cd0_s1
         self.cd0_s2 = params.cd0_s2
         self.cd0_s3 = params.cd0_s3

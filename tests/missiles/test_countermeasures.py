@@ -23,13 +23,13 @@ def _cm(cm_type, age=0.0, life=8.0, uid=99):
         lifetime_s=life,
         is_countermeasure=True,
         id=uid,
-        position=Position(0.1, 0.0, 9000.0),
+        position=Position(0.05, 0.0, 9000.0),
     )
 
 
 def _target(vx, vy, cms):
     return SimpleNamespace(
-        position=Position(0.1, 0.0, 9000.0),
+        position=Position(0.05, 0.0, 9000.0),
         velocity=SimpleNamespace(vx=vx, vy=vy, vz=0.0),
         countermeasures=SimpleNamespace(active_countermeasures=cms),
     )
@@ -38,7 +38,7 @@ def _target(vx, vy, cms):
 def _missile(fox_type, target):
     return SimpleNamespace(
         fox_type=fox_type,
-        position=Position(0.0, 0.0, 9000.0),  # ~44 km south of target
+        position=Position(0.0, 0.0, 9000.0),  # ~5.6 km south, inside SEDUCE_MAX_RANGE_M
         target=target,
         seduced_by=None,
     )

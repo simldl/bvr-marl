@@ -88,9 +88,16 @@ class ForceModel:
         K_ind: float,
         get_base_drag_cd,
         get_engine_force,
+        lift_reference_area_m2: float | None = None,
     ):
         self.mass_kg = mass_kg
         self.A_m2 = reference_area_m2
+        # Induced drag must be referenced to the surface that actually makes the lift.
+        # Defaults to the drag area, so an airframe that does not distinguish the two is
+        # arithmetically unchanged.
+        self.A_lift_m2 = float(
+            lift_reference_area_m2 if lift_reference_area_m2 is not None else reference_area_m2
+        )
         self.g = gravity
         self.air = air
         self.cd0 = cd0
@@ -99,15 +106,23 @@ class ForceModel:
         self.get_engine_force = get_engine_force
 
     def compute_total_drag(self, v_mps: float, alt_m: float, load_factor: float) -> float:
+        """Parasitic drag on the body, induced drag on the lifting surface.
+
+        The two terms carry DIFFERENT reference areas when an airframe distinguishes
+        them. Referencing CL to the body cross-section while the lift is generated on the
+        fins inflates CL by the area ratio and the induced term by its SQUARE: on the
+        AMRAAM (0.025 body vs 0.164 fin) that is 6.6x and 43x respectively, which drained
+        a Mach 3.5 missile to 360 m/s inside five seconds of a hard turn and made it fall
+        short of a target it could otherwise reach.
+        """
         rho = self.air.get_density(alt_m)
         q = 0.5 * rho * v_mps**2
         Cd_base = self.get_base_drag_cd(v_mps, alt_m)
-        if q * self.A_m2 < 1e-5:
-            Cd_induced = 0.0
-        else:
-            CL = load_factor * self.mass_kg * self.g / (q * self.A_m2)
-            Cd_induced = self.K_ind * CL**2
-        return (Cd_base + Cd_induced) * q * self.A_m2
+        parasitic = Cd_base * q * self.A_m2
+        if q * self.A_lift_m2 < 1e-5:
+            return parasitic
+        CL = load_factor * self.mass_kg * self.g / (q * self.A_lift_m2)
+        return parasitic + self.K_ind * CL**2 * q * self.A_lift_m2
 
     def compute_specific_energy_rate(
         self, v_mps: float, alt_m: float, load_factor: float, throttle: float
@@ -122,6 +137,28 @@ class ForceModel:
 class PhysicsParams:
     mass_kg: float
     reference_area_m2: float
+    #: Reference area for the LIFT/normal-force calculation, when it differs from the
+    #: drag reference area above.
+    #:
+    #: For an aircraft the two are the same wing planform, so this defaults to None and
+    #: `reference_area_m2` is used for both. For a MISSILE they are physically different
+    #: surfaces and conflating them is a real error: drag references the body cross
+    #: section, but normal force comes from the fins. The AMRAAM carries
+    #: `reference_area_m2 = 0.025` (pi * 0.089^2, the body), and feeding that to
+    #:
+    #:     n_aero = 0.5 * rho * v^2 * S * CA_max / W
+    #:
+    #: caps it at 5.4 g at Mach 3.8 / 9 km -- against a configured `n_max` of 40 g that
+    #: is therefore never once reached, in any engagement. The guidance law meanwhile
+    #: clamps its commands to `n_max * g`, so PN plans a turn roughly seven times larger
+    #: than the airframe can fly. Measured consequence: a head-on intercept demands 0.23 g
+    #: and misses by 0-3 m, while a BEAMING target demands over 400 g in the last half
+    #: kilometre, saturates, and misses by ~410 m.
+    #:
+    #: Raising `reference_area_m2` instead would have been wrong -- it feeds `ForceModel`
+    #: as the drag reference, so a 5.6x increase would have multiplied drag by 5.6x and
+    #: traded a miss problem for a reach problem.
+    lift_reference_area_m2: float | None = None
     gravity_m_s2: float = STANDARD_GRAVITY
     air: Any = field(default_factory=AirLayer)
     cd0: float = 0.01

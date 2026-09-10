@@ -20,12 +20,34 @@ import math
 from bvr_marl_core.radar.core.utils import geodetic_to_enu
 from bvr_marl_core.simulator.core.helpers import Position
 
-CHAFF_LAMBDA0 = 0.6  # per second at full effectiveness (beaming, fresh)
-DECOY_LAMBDA0 = 0.4  # per second (aspect-independent)
-FLARE_LAMBDA0 = 0.6  # per second (IR; verified/tuned in the IR step)
+# Seduction hazard rates, per second at full effectiveness.
+#
+# Measured before this retune: 10 of 16 missiles (63%) in a BT-vs-BT engagement were
+# decoyed before reaching a terminal event, while the shots that got through killed at
+# 67% (4 kills from 6 detonations). A defender was therefore defeating roughly two thirds
+# of incoming fire with expendables, which is far above what chaff or flares achieve
+# against a modern active seeker.
+#
+# At the old rates a 5 s exposure gave P(seduce) = 1 - exp(-0.6*5) = 95%, so the outcome
+# was effectively "any countermeasure released in the basket works". Cut by a third, the
+# same exposure gives ~63%, and combined with the halved resolve range below the measured
+# end-to-end seduction rate lands near a quarter of shots rather than two thirds.
+CHAFF_LAMBDA0 = 0.20  # per second at full effectiveness (beaming, fresh)
+# Decoys are the outlier and need a lower rate than chaff for the same END effect, not
+# the same rate. Chaff only works while the target beams (`_beam_factor`), so its
+# effective exposure is a fraction of the approach; a decoy is aspect-independent and
+# lives 15 s, so it works for the whole time the missile is inside the resolve range --
+# about 10 s at closing speed. At the shared rate that left decoy seduction at 0.75 while
+# chaff had already fallen to 0.25. This puts a decoy near 0.30 over the same window.
+DECOY_LAMBDA0 = 0.035  # per second (aspect-independent)
+FLARE_LAMBDA0 = 0.20  # per second (IR; verified/tuned in the IR step)
 
 # Countermeasures only seduce once the missile is close enough to resolve them.
-SEDUCE_MAX_RANGE_M = 20_000.0
+#
+# 20 km gave a decoy the better part of half a minute of flight time to work in. An active
+# seeker resolving a chaff bloom from its target at 20 km is generous; halving it both
+# raises the bar and shortens the exposure window, which compounds with the rates above.
+SEDUCE_MAX_RANGE_M = 10_000.0
 # Target radial speed (m/s) at which chaff falls out of the Doppler notch.
 CHAFF_NOTCH_MPS = 150.0
 

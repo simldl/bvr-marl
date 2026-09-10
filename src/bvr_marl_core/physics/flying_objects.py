@@ -24,6 +24,13 @@ class FlyingPhysics(BasePhysics):
         super().__init__(params)
         self.mass_kg = params.mass_kg
         self.A_m2 = params.reference_area_m2
+        # Lift/normal-force reference area. Defaults to the drag area, so an airframe
+        # that does not distinguish them is completely unaffected. See PhysicsParams.
+        self.A_lift_m2 = float(
+            params.lift_reference_area_m2
+            if getattr(params, "lift_reference_area_m2", None) is not None
+            else params.reference_area_m2
+        )
         self.g = params.gravity_m_s2
         self.air = params.air
         self.cd0 = params.cd0
@@ -59,6 +66,7 @@ class FlyingPhysics(BasePhysics):
             air=self.air,
             cd0=self.cd0,
             K_ind=self.K_ind,
+            lift_reference_area_m2=self.A_lift_m2,
             get_base_drag_cd=self.get_base_drag_cd,
             get_engine_force=self.get_engine_force,
         )
@@ -130,7 +138,8 @@ class FlyingPhysics(BasePhysics):
                 omega_max_deg = self.compute_instantaneous_turn_rate(speed_mps, pos.alt)
         else:
             g = self.g
-            S = self.A_m2
+            # Normal force comes from the lifting surfaces, not the drag cross-section.
+            S = self.A_lift_m2
             m = self.mass_kg
             W = m * g
             n_max = self.n_max

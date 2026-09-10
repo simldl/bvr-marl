@@ -11,6 +11,7 @@ Uses ObservationHelper and MissileWarner system for consistency with BT.
 
 import numpy as np
 
+from bvr_marl_core.aircraft.systems.fire_feasibility import helper_for
 from bvr_marl_core.domain.information_mode import InformationMode, resolve_information_mode
 from bvr_marl_core.domain.tactical_contact import TacticalContact
 from bvr_marl_core.rl.environment.spaces.observation.constants import WARN_FEATURE_DIM
@@ -28,13 +29,18 @@ class MissileWarningBuilder:
             getattr(config, "information_mode", None), default=InformationMode.SENSOR_LIMITED
         )
         # Cache ObservationHelpers per agent (created lazily)
-        self._obs_helpers = {}
 
     def _get_obs_helper(self, unit) -> ObservationHelper:
-        """Get or create ObservationHelper for unit (cached)."""
-        if unit.id not in self._obs_helpers:
-            self._obs_helpers[unit.id] = ObservationHelper(unit)
-        return self._obs_helpers[unit.id]
+        """The unit's own geometry helper, shared with the fire-feasibility path.
+
+        Deliberately NOT a ``{unit.id: helper}`` cache on this builder. Unit ids repeat
+        across episodes while unit objects are rebuilt (verified: id 1 in both episodes,
+        different Python objects), so such a cache hands back a helper wrapping the
+        PREVIOUS episode's dead aircraft from the second episode onward -- and training
+        reuses env instances. Caching on the unit instead means the helper dies with it,
+        and both the observation and the launch path get the same instance.
+        """
+        return helper_for(unit)
 
     def build(self, unit) -> np.ndarray:
         """

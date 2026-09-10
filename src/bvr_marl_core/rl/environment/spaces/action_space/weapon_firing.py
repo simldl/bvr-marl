@@ -9,6 +9,7 @@ import numpy as np
 
 from bvr_marl_core.aircraft.systems.fire_feasibility import (
     evaluate_fire_gates,
+    sync_designated_contact,
     sync_missile_cooldown,
 )
 from bvr_marl_core.aircraft.systems.fire_veto import (
@@ -61,6 +62,12 @@ class WeaponFiringHandler:
         # the own-radar lock rather than `gates.has_lock`: it measures this aircraft's
         # sensor discipline, so an AWACS-cued track must not flatter it.
         sync_missile_cooldown(unit, state.get("missile_cooldown_left_s", 0.0))
+        # Publish the DESIGNATED contact for the observation path, so the can-fire bit the
+        # fire-gradient mask reads is computed against the same target as the gates below
+        # rather than against whatever the radar happens to be locked to.
+        sync_designated_contact(
+            unit, selected_target, self.weapon_cooldowns.max_missiles_per_target
+        )
         gates = evaluate_fire_gates(
             unit,
             selected_target,

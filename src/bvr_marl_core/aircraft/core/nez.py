@@ -43,6 +43,56 @@ _TOF_GROUND_SPEED_FRACTION: float = 0.70
 #: not erase it.
 _TOF_MIN_CLOSING_FRACTION: float = 0.15
 
+#: Where ``r_pi`` sits in the span between ``r_min`` and ``r_aero``.
+#:
+#: ``r_pi`` is the range at which the shot is EXPECTED to intercept, so it has to carry
+#: the margin for a target that turns. At 0.80 it did not.
+#:
+#: Measured with AMRAAM flyouts through ``validation.missile_campaign``, hot geometry at
+#: 9 km, four seeds per range:
+#:
+#:     target             arrives          fails       DLZ r_pi at 0.80
+#:     non-manoeuvring    to 150 km        at 170 km   116 km
+#:     hard-turning       to  90 km        at 110 km   116 km
+#:
+#: 116 km against a 90 km manoeuvring limit is a 29% overstatement, and it is the
+#: manoeuvring case r_pi is supposed to describe -- an agent shooting at r_pi was being
+#: told the shot was expected to work at a range where it does not.
+#:
+#: 0.70 is a COMPROMISE, not the value the manoeuvring measurement alone would pick
+#: (that is ~0.60). One fraction has to serve two targets the launch decision cannot tell
+#: apart: a stationary or anchored opponent, which the weapon really does service to
+#: 150 km, and a defending fighter, which it services to 90 km. Measured r_pi for a
+#: stationary target at 10 km altitude:
+#:
+#:     0.80 -> 119.1 km      0.70 -> 104.4 km      0.65 -> 97.0 km      0.60 -> 89.7 km
+#:
+#: and `test_a_stationary_target_is_shootable_at_100km` requires > 100 km. That contract
+#: is not decoration: its docstring records a stage where too tight a DLZ put the shot out
+#: of envelope for the whole episode and "neither the BT nor the RL policy could ever
+#: fire". Anything below 0.70 reintroduces that risk to buy accuracy against a case the
+#: DLZ has no way to identify at launch.
+#:
+#: The honest fix is a fraction that depends on the target's ability to manoeuvre rather
+#: than only on its current line-of-sight velocity. Until then 0.70 removes about a third
+#: of the overstatement and keeps the envelope trainable.
+#:
+#: The ``r_aero`` time-of-flight ceiling is NOT changed: it already lands at 145 km
+#: against that measured 150 km edge. An earlier draft here also discounted the target's
+#: closure in the ceiling, on the basis that r_aero looked 25% high -- but that reading
+#: compared a METEOR envelope (`_get_best_missile_params` returns the longest-range
+#: weapon, 200 km / 160 s) against AMRAAM flyouts. Per weapon the ceiling is already
+#: right, and discounting pulled the AMRAAM down to 130 km, under-promising a range it
+#: actually has.
+#:
+#: Calibrated on the AMRAAM. The Meteor's own flyout limits have NOT been measured, so
+#: the fraction is assumed to transfer; worth checking if long-range Meteor shots matter.
+_R_PI_SPAN_FRACTION: float = 0.70
+
+#: ``r_tr`` keeps its previous position RELATIVE to r_pi (0.55/0.80 = 0.69) so narrowing
+#: the intercept range does not invert the zone ordering.
+_R_TR_SPAN_FRACTION: float = 0.48
+
 
 class NoEscapeZoneCalculator:
     def __init__(self, own_aircraft):
@@ -470,8 +520,8 @@ class NoEscapeZoneCalculator:
             alt_advantage_m,
         )
         span = max(0.0, r_aero - r_min)
-        r_pi = r_min + 0.80 * span
-        r_tr = r_min + 0.55 * span
+        r_pi = r_min + _R_PI_SPAN_FRACTION * span
+        r_tr = r_min + _R_TR_SPAN_FRACTION * span
         nez_frac = _clamp(0.35 - target_speed_mps / 2000.0, 0.12, 0.35)
         r_nez_out = max(r_min + nez_frac * span, r_min + 500.0)
         return self.DLZ(r_min, r_tr, r_pi, r_aero, r_min, r_nez_out)

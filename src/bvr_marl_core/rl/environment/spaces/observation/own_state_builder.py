@@ -8,6 +8,7 @@ import math
 
 import numpy as np
 
+from bvr_marl_core.aircraft.systems.fire_feasibility import helper_for
 from bvr_marl_core.domain.information_mode import InformationMode, resolve_information_mode
 from bvr_marl_core.domain.tactical_contact import TacticalContact
 from bvr_marl_core.rl.environment.spaces.observation.constants import (
@@ -39,13 +40,18 @@ class OwnStateBuilder:
         # Active sensing: widen the ownship vector with own radar-emission state.
         self.emcon_action_enabled = bool(getattr(config, "emcon_action_enabled", False))
         self._own_dim = own_state_dim(self.emcon_action_enabled)
-        self._obs_helpers = {}
 
     def _get_obs_helper(self, unit) -> ObservationHelper:
-        """Get or create ObservationHelper for unit (cached)."""
-        if unit.id not in self._obs_helpers:
-            self._obs_helpers[unit.id] = ObservationHelper(unit)
-        return self._obs_helpers[unit.id]
+        """The unit's own geometry helper, shared with the fire-feasibility path.
+
+        Deliberately NOT a ``{unit.id: helper}`` cache on this builder. Unit ids repeat
+        across episodes while unit objects are rebuilt (verified: id 1 in both episodes,
+        different Python objects), so such a cache hands back a helper wrapping the
+        PREVIOUS episode's dead aircraft from the second episode onward -- and training
+        reuses env instances. Caching on the unit instead means the helper dies with it,
+        and both the observation and the launch path get the same instance.
+        """
+        return helper_for(unit)
 
     def build(self, unit) -> np.ndarray:
         """
@@ -68,7 +74,7 @@ class OwnStateBuilder:
         """
         obs_helper = self._get_obs_helper(unit)
         target = (
-            self._locked_contact(unit)
+            self._cue_target(unit)
             if self.information_mode is InformationMode.SENSOR_LIMITED
             else getattr(unit, "target", None)
         )
@@ -135,9 +141,40 @@ class OwnStateBuilder:
         )
         return [emitting, duty, since_toggle]
 
+    @classmethod
+    def _cue_target(cls, unit) -> TacticalContact | None:
+        """The contact the ownship tactical cues describe: the DESIGNATED one.
+
+        Both cues that use it -- the radar-lock quality at ``OWN_IDX_RADAR_LOCK`` and the
+        can-fire bit at ``OWN_IDX_CAN_FIRE`` -- are documented as being "on the selected
+        target", and ``tactical/lock_rate`` is measured that way too. Resolving them from
+        the radar lock instead made the observation describe a different contact than
+        every metric and than the launch path.
+
+        For the can-fire bit specifically that was not a cosmetic mismatch: it is what the
+        fire-gradient mask keys off, and :func:`~bvr_marl_core.aircraft.systems.
+        fire_feasibility.sync_designated_contact` documents the ~430x gap it opened.
+
+        Falls back to the locked contact when nothing has been designated yet -- the reset
+        observation is built before any action has run, and minimal test doubles never
+        carry the mirror.
+        """
+        if hasattr(unit, "designated_contact"):
+            designated = unit.designated_contact
+            if designated is not None:
+                return designated
+            # An explicit "no target designated" is authoritative: the launch path would
+            # veto with `no_target_selected`, so the cues must not describe some other
+            # contact the radar happens to hold.
+            return None
+        return cls._locked_contact(unit)
+
     @staticmethod
     def _locked_contact(unit) -> TacticalContact | None:
-        """Return a lock-grade operational contact for ownship tactical cues."""
+        """Return a lock-grade operational contact for ownship tactical cues.
+
+        Fallback for the pre-designation observation only; see :meth:`_cue_target`.
+        """
         sensor = getattr(unit, "sensor", None)
         try:
             locked_ids = set(sensor.get_locked_targets() or ())

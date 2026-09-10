@@ -11,7 +11,7 @@ from bvr_marl_core.missiles.guidance.guidance import MissileGuidance
 from bvr_marl_core.missiles.guidance.target_provider import GuidanceTargetProvider
 from bvr_marl_core.physics.missiles import MissilePhysics
 from bvr_marl_core.radar.core.data_link import DataLink
-from bvr_marl_core.radar.obs.observation import DEFAULT_NOTCH_VELOCITY_MPS
+from bvr_marl_core.radar.obs.observation import DEFAULT_SEEKER_NOTCH_VELOCITY_MPS
 from bvr_marl_core.radar.units.missile import MissileRadar
 from bvr_marl_core.simulator.core.events import Event
 from bvr_marl_core.simulator.core.helpers import Position
@@ -547,6 +547,10 @@ class Missile(FlyingUnit):
             MissilePhysics.Params(
                 mass_kg=cfg["mass_kg"],
                 reference_area_m2=cfg["reference_area_m2"],
+                # Optional. Absent, MissilePhysics sizes it from `n_max` so the rated
+                # load factor is actually reachable; `reference_area_m2` stays the DRAG
+                # cross-section and is not disturbed.
+                lift_reference_area_m2=cfg.get("lift_reference_area_m2"),
                 aspect_ratio=cfg["aspect_ratio"],
                 oswald_e=cfg["oswald_e"],
                 cd0=cfg["drag_coefficient"],
@@ -574,7 +578,7 @@ class Missile(FlyingUnit):
             data_link=DataLink(data_link_mode),
             initial_datalink_mode="other",
             original_data_link_mode=data_link_mode,
-            notch_velocity_mps=rc.get("notch_velocity_mps", DEFAULT_NOTCH_VELOCITY_MPS),
+            notch_velocity_mps=rc.get("notch_velocity_mps", DEFAULT_SEEKER_NOTCH_VELOCITY_MPS),
             processing_gain_db=rc.get("processing_gain_db", 33.0),
         )
 

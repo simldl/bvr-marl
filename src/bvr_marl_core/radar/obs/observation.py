@@ -11,12 +11,34 @@ from bvr_marl_core.simulator.core.helpers import Position
 from bvr_marl_core.simulator.core.units import Unit
 from bvr_marl_core.simulator.utils.angles import signed_yaw_deg_diff
 
-# Default half-width (m/s) of the pulse-Doppler "main-lobe clutter" notch enabled
-# on operational radars/seekers. A target whose LOS-projected closing rate falls
-# below this is hidden in the zero-Doppler notch (the basis of the beaming/notch
-# defensive maneuver). The base Radar keeps the notch disabled (0.0) so generic
-# unit tests are unaffected; operational aircraft/missile radars opt in.
+# Default half-width (m/s) of the pulse-Doppler "main-lobe clutter" notch enabled on
+# operational radars. A target whose own GROUND-RELATIVE radial velocity falls below this
+# sits on the clutter line and is filtered out with it -- the beaming/notch defensive
+# manoeuvre. The base Radar keeps the notch disabled (0.0) so generic unit tests are
+# unaffected; operational aircraft/missile radars opt in.
 DEFAULT_NOTCH_VELOCITY_MPS = 50.0
+
+# A missile seeker is far less notch-vulnerable than a surveillance radar, and modelling
+# them with one number is what let a geometry that should only degrade the SEARCH picture
+# also blind terminal homing. The seeker looks over a few km rather than a few hundred,
+# so it carries an enormous SNR margin, and its high PRF puts the clutter line far from
+# the target return. Beaming should cost a shooter its track well before it costs a
+# committed weapon its seeker.
+DEFAULT_SEEKER_NOTCH_VELOCITY_MPS = 15.0
+
+# Residual detection probability for a target sitting exactly on the clutter line.
+#
+# DEFAULTS OFF (0.0), deliberately. A real notch does leak -- sidelobe return,
+# altitude-line separation, and target motion that is never perfectly perpendicular -- and
+# a floor was tried here to stop total dropout making a weapon coast. It was dropped for
+# two reasons: full rejection at the clutter line is an explicit, validated contract
+# (`notch_zero_radial_detection_fraction` in the operational radar campaign, and
+# `test_notch_factor_ramps_with_range_rate`), and the terminal-dropout problem the floor
+# was aimed at is addressed more precisely by DEFAULT_SEEKER_NOTCH_VELOCITY_MPS, which
+# narrows the notch for the seeker rather than making every notch leak. Kept as a knob so
+# the leak can be modelled deliberately; measured no effect on the validation campaign at
+# 0.05, so it buys nothing by default.
+DEFAULT_NOTCH_FLOOR = 0.0
 
 # Convert a resolution-cell *width* into the 1-sigma measurement uncertainty it
 # implies. A measurement known only to lie somewhere inside a cell of width w is
@@ -44,6 +66,7 @@ class RadarObsGenerator:
         np_rng=None,
         device=None,  # Accepted for backwards compatibility; ignored.
         notch_velocity_mps: float = 0.0,
+        notch_floor: float = DEFAULT_NOTCH_FLOOR,
         meas_angular_noise_deg: float = 0.0,
         meas_range_noise_m: float = 0.0,
         doppler_noise_hz: float = 0.0,
@@ -55,6 +78,7 @@ class RadarObsGenerator:
         self.snr_threshold_db = snr_threshold_db
         self.np_rng = np_rng if np_rng is not None else np.random.default_rng(0)
         self.notch_velocity_mps = float(notch_velocity_mps)
+        self.notch_floor = min(1.0, max(0.0, float(notch_floor)))
         # Reported-measurement noise (0 = perfect report). Angular noise gives a
         # range-scaled cross-range error; range noise is an along-LOS floor.
         self.meas_angular_noise_deg = float(meas_angular_noise_deg)
@@ -101,25 +125,41 @@ class RadarObsGenerator:
     def _notch_detection_factor(
         self, dE: float, dN: float, dU: float, dist: float, tgt, own_velocity
     ) -> float:
-        """Detection-probability multiplier for the Doppler notch.
+        """Detection-probability multiplier for the main-lobe clutter notch.
 
-        Returns 1.0 outside the notch and falls smoothly to 0.0 as the
-        LOS-projected relative (range-rate) velocity approaches zero, so a
-        target beaming the radar (range rate ~ 0) becomes effectively invisible.
+        A pulse-Doppler radar rejects returns that fall in the Doppler band occupied by
+        main-lobe ground clutter. What decides that is the TARGET's own ground-relative
+        radial velocity: a target flying perpendicular to the line of sight has ~zero
+        range rate against the ground, sits on the clutter line, and is filtered out with
+        it. That is the beaming/notch defensive manoeuvre.
+
+        This used to be computed from the CLOSING rate, ``(v_tgt - v_own) . r_hat``,
+        which is dominated by the observer's own motion and is never small in an
+        engagement -- measured live at -1630 m/s hot and -1243 m/s beam, against a 50 m/s
+        threshold. The factor was therefore 1.0 in every case that has ever been run:
+        beaming bought no protection at all and the parameter was decorative.
+
+        Two deliberate softenings, because a hard zero here is its own failure mode:
+
+        * the rolloff is quadratic in the ratio, so the penalty is concentrated near the
+          clutter line rather than smeared across the band;
+        * ``notch_floor`` can model the leak a real notch has, but defaults to 0.0 -- full
+          rejection at the clutter line is a validated contract, and the terminal-dropout
+          problem is handled by giving the seeker its own narrower notch instead.
         """
         vn = self.notch_velocity_mps
-        if vn <= 0.0 or own_velocity is None:
+        if vn <= 0.0:
             return 1.0
         inv = 1.0 / max(dist, 1e-6)
         r_e, r_n, r_u = dE * inv, dN * inv, dU * inv
         tvx, tvy, tvz = self._vel_xyz(getattr(tgt, "velocity", None))
-        ovx, ovy, ovz = self._vel_xyz(own_velocity)
-        # Range rate = d||R||/dt = (v_tgt - v_own) · r_hat. Small |.| => in notch.
-        range_rate = (tvx - ovx) * r_e + (tvy - ovy) * r_n + (tvz - ovz) * r_u
-        a = abs(range_rate)
+        # Ground-relative radial velocity of the TARGET. `own_velocity` deliberately does
+        # not appear: the clutter the target has to hide in is stationary ground.
+        target_range_rate = tvx * r_e + tvy * r_n + tvz * r_u
+        a = abs(target_range_rate)
         if a >= vn:
             return 1.0
-        return (a / vn) ** 2
+        return max(self.notch_floor, (a / vn) ** 2)
 
     def generate(
         self,
