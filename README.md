@@ -36,19 +36,6 @@ identification and battle-damage-assessment observation features, A-pole/F-pole 
 estimates, an information firewall enforced at runtime, a networked-datalink weapon class,
 and a seeded verification and validation suite (`python -m bvr_marl_core.validation.cli`).
 
-Two notes on scope. The reward calculator shipped here is the terminal-only baseline —
-kills, own losses, boundary violations, and a last-team-standing bonus — so the dense
-shaping suite the paper sketches is not part of this package; the enemy-fighter
-observation token exposes an extension point (`ef_extra_dim`) for widening it, and the
-reward calculator is designed to be replaced wholesale.
-
-Three training additions address failures observed in long curriculum runs, and each is
-**active by default** rather than opt-in: critic warm-up (`critic_warmup_iterations: 15`),
-a floored KL coefficient (`kl_coeff_floor: 0.003`), and separate actor/critic gradient
-clipping (`policy_grad_clip: 10.0`). Set each to `0`, `0.0` and `null` respectively to
-recover stock RLlib behaviour — worth doing if you are comparing against a stock PPO
-baseline.
-
 ## Quick Start
 
 ```bash
@@ -88,7 +75,7 @@ bvr-view
 ### Visualization and Replay Tools
 - **Live visualization**: Real-time 2D combat display with tactical overlays
 - **RL commands panel**: Action and command visualization during inference
-- **Tacview export**: Professional 3D replay in ACMI format (DCS-compatible)
+- **Tacview export**: Professional 3D replay in ACMI format
 
 ### GUI and Analysis
 - **Streamlit GUI**: Complete control panel for training, visualization, and analysis
@@ -225,11 +212,6 @@ bvr-train-simple
 bvr-train-simple --config configs/training/basic.yaml
 ```
 
-#### Public Baseline Training
-```bash
-bvr-train-public
-```
-
 ### Environment Configuration
 
 Scenarios are configured via YAML files in `configs/training/`:
@@ -241,7 +223,7 @@ env:
   max_steps: 1200
   agent_aircraft_type: "F22"
   opponent_aircraft_type: "Su57"
-  datalink_mode: full    # full | own | none | other | msl_support
+  datalink_mode: full    # full | own | none
 
   random_map:
     min_separation_m: 40000
@@ -253,27 +235,13 @@ env:
     max_separation_m: 100000
 ```
 
-```yaml
-training:
-  # Iterations at the start of each run during which only the value function
-  # receives gradient. Curriculum promotion warm-starts the whole module, so the
-  # next stage inherits a critic calibrated to the previous stage's return scale.
-  # 0 restores stock RLlib behaviour. The rationale is documented in
-  # `rl/training/critic_warmup_learner.py`.
-  critic_warmup_iterations: 15
-```
-
 ### Tacview Export
 ```bash
 # RL model scenario
 bvr-tacview --checkpoint path/to/checkpoint
 
-# Behavior-tree scenario, when the behavior package is installed
-bvr-tacview-bt
-
-# Via script (unified interface for both)
+# Via script
 python scripts/tacview/generate_scenario.py --controller rl --checkpoint model.pkl
-python scripts/tacview/generate_scenario.py --controller behavior-tree --num-scenarios 5
 ```
 
 ### Batch Training & Analysis
@@ -319,8 +287,6 @@ All commands available after `pip install -e .`:
 | `bvr-view-commands` | RL command panel |
 | `bvr-export-plots` | Export training analysis plots |
 | `bvr-tacview` | Generate Tacview ACMI (RL model) |
-
-The optional behavior package adds `bvr-view-bt` and `bvr-tacview-bt`.
 
 ## Training Configurations
 
